@@ -1415,7 +1415,7 @@ mod win {
                 return;
             }
         };
-        let initial = format!("{}.toml", sanitize_filename(&app.cfg.app.app_id));
+        let initial = format!("{}.toml", safe_file_name(&app.cfg.app.app_id));
         let Some(path) = file_dialog(
             hwnd,
             true,

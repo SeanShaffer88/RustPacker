@@ -473,17 +473,37 @@ pub fn is_bare_filename(name: &str) -> bool {
         return false;
     }
     let stem = name.split('.').next().unwrap_or(name);
-    let upper = stem.to_ascii_uppercase();
-    if matches!(
-        upper.as_str(),
-        "CON" | "PRN" | "AUX" | "NUL"
-            | "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6" | "COM7" | "COM8"
-            | "COM9" | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6" | "LPT7"
-            | "LPT8" | "LPT9"
-    ) {
-        return false;
-    }
-    true
+    !is_reserved_device_name(stem)
+}
+
+/// Windows reserved device names (`CON`, `NUL`, `COM1`, …), matched
+/// case-insensitively on the stem before the first dot.
+fn is_reserved_device_name(stem: &str) -> bool {
+    matches!(
+        stem.to_ascii_uppercase().as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    )
 }
 
 /// Make a file-name component safe for Windows: replace characters
@@ -506,14 +526,7 @@ pub fn safe_file_name(raw: &str) -> String {
         return "App".to_string();
     }
     let stem = trimmed.split('.').next().unwrap_or(trimmed);
-    let upper = stem.to_ascii_uppercase();
-    if matches!(
-        upper.as_str(),
-        "CON" | "PRN" | "AUX" | "NUL"
-            | "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6" | "COM7" | "COM8"
-            | "COM9" | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6" | "LPT7"
-            | "LPT8" | "LPT9"
-    ) {
+    if is_reserved_device_name(stem) {
         format!("_{trimmed}")
     } else {
         trimmed.to_string()

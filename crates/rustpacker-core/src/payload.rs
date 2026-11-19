@@ -170,6 +170,7 @@ pub fn normalized_rel_str(path: &str) -> Result<String, String> {
     Ok(parts.join("/"))
 }
 
+#[derive(Debug)]
 struct ArchiveFile {
     path: String,
     data: Vec<u8>,
@@ -476,7 +477,7 @@ fn decode_payload(exe: &[u8]) -> Result<Vec<ArchiveFile>, String> {
     let len_usize = usize::try_from(info.payload_len)
         .map_err(|_| "payload bounds in footer do not match the file size")?;
     let payload = &exe[offset_usize..offset_usize + len_usize];
-    let mut decoder =
+    let decoder =
         zstd::Decoder::new(payload).map_err(|e| format!("payload decompression failed: {e}"))?;
     // Pre-allocate only a bounded chunk; the `take` limit below is the
     // real guard against decompression bombs.
@@ -911,6 +912,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn extract_refuses_symlink_escape() {
         let exe = pack_files(
             &stub(),
@@ -927,16 +929,12 @@ mod tests {
         std::fs::create_dir_all(&outside).expect("mkdir outside");
         std::fs::create_dir_all(&dest).expect("mkdir dest");
         // Pre-seed dest/sub as a symlink to outside.
-        #[cfg(unix)]
         std::os::unix::fs::symlink(&outside, dest.join("sub")).expect("symlink");
-        #[cfg(unix)]
-        {
-            assert!(extract_payload(&exe, &dest).is_err());
-            assert!(
-                !outside.join("file.txt").exists(),
-                "payload must not escape via symlink"
-            );
-        }
+        assert!(extract_payload(&exe, &dest).is_err());
+        assert!(
+            !outside.join("file.txt").exists(),
+            "payload must not escape via symlink"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 

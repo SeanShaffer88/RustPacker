@@ -1073,7 +1073,7 @@ mod imp {
         reg_result?;
         journal.record(JournalAction::ArpEntry {
             root: arp_root_name.to_string(),
-            key: arp_key,
+            key: arp_key.clone(),
         });
 
         report(86, "Applying project registry entries...");

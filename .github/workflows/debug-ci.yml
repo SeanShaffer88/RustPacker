@@ -17,35 +17,38 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
-          components: rustfmt, clippy
+          components: rustfmt
 
-      - name: Collect diagnostics
+      - name: Registry symbol location
         shell: bash
         run: |
           set +e
+          ROOT=$(rustc --print sysroot)/lib/rustlib/src/rust
+          echo "src root: $ROOT"
+          # Try to fetch the windows-sys source used by the lockfile.
+          cargo fetch -q 2>/dev/null
+          WS=$(find ~/.cargo/registry/src -maxdepth 2 -name 'windows-sys-0.61*' | head -n 1)
+          echo "windows-sys: $WS"
           {
-            echo '<!-- rustpacker-diag -->'
-            echo '### fmt'
+            echo '<!-- rustpacker-regdiag -->'
             echo '```'
-            cargo fmt --all -- --check 2>&1 | head -n 400
-            echo '```'
-            echo '### clippy'
-            echo '```'
-            cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc 2>&1 \
-              | grep -vE '^\s+(Compiling|Checking|Finished|Blocking)' | head -n 500
-            echo '```'
-            echo '### test'
-            echo '```'
-            cargo test --workspace 2>&1 | tail -n 300
+            if [ -n "$WS" ]; then
+              echo "--- files mentioning RegCreateKeyExW ---"
+              grep -rn "RegCreateKeyExW" "$WS/src" | head -n 20
+              echo "--- features list containing Registry ---"
+              sed -n '/^\[features\]/,$p' "$WS/Cargo.toml" | grep -n "Registry\|RealFunc" | head -n 20
+            else
+              echo "windows-sys source not found"
+            fi
             echo '```'
           } > diag.md
-          wc -c diag.md
+          cat diag.md
 
       - name: Post diagnostics as a PR comment
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Keep the comment under GitHub's 65536-character limit.
+          sed -i 's/<!-- rustpacker-regdiag -->/<!-- rustpacker-regdiag -->/' diag.md
           head -c 60000 diag.md > diag-truncated.md
-          gh pr comment 1 --body-file diag-truncated.md
+          gh pr comment 1 --body-file diag-truncated.md --edit-last 2>/dev/null || gh pr comment 1 --body-file diag-truncated.md
