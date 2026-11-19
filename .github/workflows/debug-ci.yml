@@ -5,6 +5,10 @@ on:
     branches: [arena/6b18f778-rustpacker]
   workflow_dispatch:
 
+permissions:
+  contents: read
+  pull-requests: write
+
 jobs:
   diag:
     runs-on: windows-latest
@@ -15,48 +19,33 @@ jobs:
           targets: x86_64-pc-windows-msvc
           components: rustfmt, clippy
 
-      - name: fmt (annotated)
+      - name: Collect diagnostics
         shell: bash
         run: |
           set +e
-          cargo fmt --all -- --check > fmt.log 2>&1
-          echo "exit=$?" >> fmt.log
-          # rustfmt prints a unified diff; surface the file headers.
-          grep -E '^Diff in|^error|^warning' fmt.log | head -n 10 | while IFS= read -r line; do
-            echo "::error::$line"
-          done
-          cat fmt.log
+          {
+            echo '<!-- rustpacker-diag -->'
+            echo '### fmt'
+            echo '```'
+            cargo fmt --all -- --check 2>&1 | head -n 400
+            echo '```'
+            echo '### clippy'
+            echo '```'
+            cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc 2>&1 \
+              | grep -vE '^\s+(Compiling|Checking|Finished|Blocking)' | head -n 500
+            echo '```'
+            echo '### test'
+            echo '```'
+            cargo test --workspace 2>&1 | tail -n 300
+            echo '```'
+          } > diag.md
+          wc -c diag.md
 
-      - name: clippy (annotated)
+      - name: Post diagnostics as a PR comment
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set +e
-          cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc 2>&1 | tee clippy.log
-          echo "--- compiler diagnostics ---"
-          grep -E '^(error|warning)(\[|:)' clippy.log | sort -u | head -n 10 | while IFS= read -r line; do
-            echo "::error::$line"
-          done
-          grep -E '^\s+--> ' clippy.log | sort -u | head -n 10 | while IFS= read -r line; do
-            echo "::error::$line"
-          done
-
-      - name: test (annotated)
-        shell: bash
-        run: |
-          set +e
-          cargo test --workspace > test.log 2>&1
-          echo "exit=$?" >> test.log
-          grep -E '^(error|warning)(\[|:)|panicked at|FAILED|failures:' test.log | sort -u | head -n 10 | while IFS= read -r line; do
-            echo "::error::$line"
-          done
-          tail -n 40 test.log
-
-      - name: upload logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: diag-logs
-          path: |
-            fmt.log
-            clippy.log
-            test.log
+          # Keep the comment under GitHub's 65536-character limit.
+          head -c 60000 diag.md > diag-truncated.md
+          gh pr comment 1 --body-file diag-truncated.md
