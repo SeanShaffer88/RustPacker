@@ -84,9 +84,8 @@ mod imp {
         SendMessageW, SetTimer, SetWindowTextW, ShowWindow, TranslateMessage, BM_GETCHECK,
         BM_SETCHECK, BN_CLICKED, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, HMENU, IDC_ARROW, IDYES,
         MB_DEFBUTTON2, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK, MB_YESNO, MSG,
-        STN_CLICKED, SW_SHOWNORMAL, WM_COMMAND,
-        WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN,
-        WM_PARENTNOTIFY, WM_SETFONT, WM_TIMER, WNDCLASSEXW,
+        STN_CLICKED, SW_SHOWNORMAL, WM_COMMAND, WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC,
+        WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_PARENTNOTIFY, WM_SETFONT, WM_TIMER, WNDCLASSEXW,
     };
 
     // Control IDs.
@@ -174,8 +173,8 @@ mod imp {
     /// hard error: silently installing a placeholder app instead would
     /// hide tampering and leave a bogus Apps & Features entry behind.
     fn load_config() -> Result<(ProjectConfig, bool), String> {
-        let exe = std::env::current_exe()
-            .map_err(|e| format!("could not locate this installer: {e}"))?;
+        let exe =
+            std::env::current_exe().map_err(|e| format!("could not locate this installer: {e}"))?;
         let bytes =
             std::fs::read(&exe).map_err(|e| format!("could not read this installer: {e}"))?;
         if find_payload(&bytes).is_err() {
@@ -345,9 +344,7 @@ mod imp {
 
     /// Current Windows build number (e.g. 22631), or 0 when unknown.
     fn windows_build() -> u32 {
-        use windows_sys::Win32::System::SystemInformation::{
-            GetVersionExW, OSVERSIONINFOW,
-        };
+        use windows_sys::Win32::System::SystemInformation::{GetVersionExW, OSVERSIONINFOW};
         let mut info: OSVERSIONINFOW = unsafe { std::mem::zeroed() };
         info.dwOSVersionInfoSize = std::mem::size_of::<OSVERSIONINFOW>() as u32;
         let rc = unsafe { GetVersionExW(&mut info) };
@@ -533,13 +530,7 @@ mod imp {
     fn schedule_delete_on_reboot(path: &Path) -> bool {
         use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_DELAY_UNTIL_REBOOT};
         let wpath = wide(&path.to_string_lossy());
-        let rc = unsafe {
-            MoveFileExW(
-                pcw(&wpath),
-                std::ptr::null(),
-                MOVEFILE_DELAY_UNTIL_REBOOT,
-            )
-        };
+        let rc = unsafe { MoveFileExW(pcw(&wpath), std::ptr::null(), MOVEFILE_DELAY_UNTIL_REBOOT) };
         rc != 0
     }
 
@@ -572,7 +563,9 @@ mod imp {
             match action {
                 JournalAction::CreateFile { path } | JournalAction::CreateShortcut { path } => {
                     if !confined(path) {
-                        failures.push(format!("refused to delete outside the install folder: {path}"));
+                        failures.push(format!(
+                            "refused to delete outside the install folder: {path}"
+                        ));
                         continue;
                     }
                     if Path::new(path).is_file() {
@@ -583,7 +576,9 @@ mod imp {
                 }
                 JournalAction::OverwriteFile { path, backup_name } => {
                     if !confined(path) {
-                        failures.push(format!("refused to restore outside the install folder: {path}"));
+                        failures.push(format!(
+                            "refused to restore outside the install folder: {path}"
+                        ));
                         continue;
                     }
                     let backup = base.join(backup_name);
@@ -807,7 +802,14 @@ mod imp {
         } else {
             start_menu_dir()?
         };
-        create_shortcut_in(&folder, target, link_name, working_dir, link_name, arguments)
+        create_shortcut_in(
+            &folder,
+            target,
+            link_name,
+            working_dir,
+            link_name,
+            arguments,
+        )
     }
 
     fn create_shortcut_in(
@@ -824,8 +826,7 @@ mod imp {
         // S_OK (0) or S_FALSE (1): we own a CoUninitialize. RPC_E_CHANGED_MODE
         // means COM was already initialised differently; proceed without it.
         let we_initialised = hr_init >= 0;
-        let result =
-            create_shortcut_inner(target, &link_path, working_dir, description, arguments);
+        let result = create_shortcut_inner(target, &link_path, working_dir, description, arguments);
         if we_initialised {
             unsafe { CoUninitialize() };
         }
@@ -923,8 +924,13 @@ mod imp {
                     || matches!(cfg.install.scope, InstallScope::PerMachine);
                 if !is_elevated() && wants_machine {
                     let undo_failures = rollback_journal(&journal, install_dir);
-                    let detail = if undo_failures.is_empty() { String::new() } else {
-                        format!("\nSome items may remain:\n  - {}", undo_failures.join("\n  - "))
+                    let detail = if undo_failures.is_empty() {
+                        String::new()
+                    } else {
+                        format!(
+                            "\nSome items may remain:\n  - {}",
+                            undo_failures.join("\n  - ")
+                        )
                     };
                     return Err(format!(
                         "{e}\n\nThis project installs for all users (per-machine), which needs \
@@ -935,7 +941,9 @@ mod imp {
                 report(0, "Rolling back...");
                 let undo_failures = rollback_journal(&journal, install_dir);
                 if undo_failures.is_empty() {
-                    Err(format!("{e}\n\nEvery change made by the installer was rolled back."))
+                    Err(format!(
+                        "{e}\n\nEvery change made by the installer was rolled back."
+                    ))
                 } else {
                     Err(format!(
                         "{e}\n\nRollback was incomplete; these items may remain:\n  - {}",
@@ -1139,10 +1147,11 @@ mod imp {
             let already = previous
                 .as_deref()
                 .map(|p| {
-                    p.split(';')
-                        .any(|part| part.trim().trim_end_matches('\\').eq_ignore_ascii_case(
-                            install_dir.trim().trim_end_matches('\\'),
-                        ))
+                    p.split(';').any(|part| {
+                        part.trim()
+                            .trim_end_matches('\\')
+                            .eq_ignore_ascii_case(install_dir.trim().trim_end_matches('\\'))
+                    })
                 })
                 .unwrap_or(false);
             if !already {
@@ -1193,15 +1202,7 @@ mod imp {
     fn is_elevated() -> bool {
         let sub = wide("SOFTWARE");
         let mut hk: HKEY = std::ptr::null_mut();
-        let rc = unsafe {
-            RegOpenKeyExW(
-                HKEY_LOCAL_MACHINE,
-                pcw(&sub),
-                0,
-                KEY_WRITE,
-                &mut hk,
-            )
-        };
+        let rc = unsafe { RegOpenKeyExW(HKEY_LOCAL_MACHINE, pcw(&sub), 0, KEY_WRITE, &mut hk) };
         if rc != ERROR_SUCCESS {
             return false;
         }
@@ -1282,16 +1283,13 @@ mod imp {
         // Refuse a journal whose own location is not where this exe lives,
         // or whose entries point outside its install directory.
         let journal_dir_ok = journal.is_path_confined(&dir.to_string_lossy());
-        let escapes = journal
-            .entries
-            .iter()
-            .any(|e| match &e.action {
-                JournalAction::CreateFile { path }
-                | JournalAction::CreateShortcut { path }
-                | JournalAction::OverwriteFile { path, .. }
-                | JournalAction::CreateDir { path } => !journal.is_path_confined(path),
-                _ => false,
-            });
+        let escapes = journal.entries.iter().any(|e| match &e.action {
+            JournalAction::CreateFile { path }
+            | JournalAction::CreateShortcut { path }
+            | JournalAction::OverwriteFile { path, .. }
+            | JournalAction::CreateDir { path } => !journal.is_path_confined(path),
+            _ => false,
+        });
         if !journal_dir_ok || escapes {
             if !silent {
                 message_box(
@@ -1483,9 +1481,7 @@ mod imp {
                     format!(
                         "License agreement for {} {}\r\n\r\n{}\r\n\r\n\
                          Press Next if you accept the agreement.",
-                        cfg.app.name,
-                        cfg.app.version,
-                        text
+                        cfg.app.name, cfg.app.version, text
                     )
                 }
             }
@@ -2010,7 +2006,10 @@ mod imp {
                     path: link.to_string_lossy().into_owned(),
                 }),
                 Err(err) => message_box(
-                    &format!("Shortcut '{}' could not be created.\n\n{err}", shortcut.name),
+                    &format!(
+                        "Shortcut '{}' could not be created.\n\n{err}",
+                        shortcut.name
+                    ),
                     "Setup",
                     true,
                 ),
@@ -2276,8 +2275,7 @@ mod imp {
         if !is_elevated() {
             let needs_machine = match load_config() {
                 Ok((cfg, _)) => {
-                    cfg.install.require_admin
-                        || cfg.install.scope.resolve(true).is_machine_wide()
+                    cfg.install.require_admin || cfg.install.scope.resolve(true).is_machine_wide()
                 }
                 Err(_) => false,
             };

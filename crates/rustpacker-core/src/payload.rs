@@ -86,10 +86,28 @@ fn is_reserved_name(segment: &str) -> bool {
     let upper = stem.to_ascii_uppercase();
     matches!(
         upper.as_str(),
-        "CON" | "PRN" | "AUX" | "NUL"
-            | "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6" | "COM7" | "COM8"
-            | "COM9" | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6" | "LPT7"
-            | "LPT8" | "LPT9"
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
     )
 }
 
@@ -118,8 +136,13 @@ pub fn sanitise_rel_path(path: &str) -> Result<PathBuf, String> {
             "payload entry path contains ':' (drive/ADS not allowed): {path}"
         ));
     }
-    if normalised.chars().any(|c| (c as u32) < 0x20 || c as u32 == 0x7f) {
-        return Err(format!("payload entry path contains control characters: {path}"));
+    if normalised
+        .chars()
+        .any(|c| (c as u32) < 0x20 || c as u32 == 0x7f)
+    {
+        return Err(format!(
+            "payload entry path contains control characters: {path}"
+        ));
     }
     let mut out = PathBuf::new();
     for segment in normalised.split('/') {
@@ -129,7 +152,10 @@ pub fn sanitise_rel_path(path: &str) -> Result<PathBuf, String> {
         if segment.is_empty() || segment == ".." {
             return Err(format!("payload entry path escapes its root: {path}"));
         }
-        if segment.chars().any(|c| matches!(c, '<' | '>' | '"' | '|' | '?' | '*')) {
+        if segment
+            .chars()
+            .any(|c| matches!(c, '<' | '>' | '"' | '|' | '?' | '*'))
+        {
             return Err(format!(
                 "payload entry path contains a Windows-forbidden character: {path}"
             ));
@@ -438,8 +464,8 @@ pub fn find_payload(exe: &[u8]) -> Result<PackedInfo, String> {
     let end = payload_offset
         .checked_add(payload_len)
         .ok_or("payload bounds in footer overflow")?;
-    let end_usize = usize::try_from(end)
-        .map_err(|_| "payload bounds in footer do not match the file size")?;
+    let end_usize =
+        usize::try_from(end).map_err(|_| "payload bounds in footer do not match the file size")?;
     if end_usize != exe.len() - FOOTER_LEN {
         return Err("payload bounds in footer do not match the file size".into());
     }
@@ -481,8 +507,7 @@ fn decode_payload(exe: &[u8]) -> Result<Vec<ArchiveFile>, String> {
         zstd::Decoder::new(payload).map_err(|e| format!("payload decompression failed: {e}"))?;
     // Pre-allocate only a bounded chunk; the `take` limit below is the
     // real guard against decompression bombs.
-    let initial_cap = usize::try_from(info.archive_len.min(16 * 1024 * 1024))
-        .unwrap_or(0);
+    let initial_cap = usize::try_from(info.archive_len.min(16 * 1024 * 1024)).unwrap_or(0);
     let mut archive = Vec::with_capacity(initial_cap);
     let limit = info.archive_len.saturating_add(1);
     decoder
@@ -672,8 +697,9 @@ pub fn write_stored_zip(entries: &[(&str, &[u8])]) -> Result<Vec<u8>, String> {
     }
     let central_offset = u32::try_from(out.len())
         .map_err(|_| "portable ZIP is too large (offset exceeds u32 range)".to_string())?;
-    let central_len = u32::try_from(central.len())
-        .map_err(|_| "portable ZIP is too large (central directory exceeds u32 range)".to_string())?;
+    let central_len = u32::try_from(central.len()).map_err(|_| {
+        "portable ZIP is too large (central directory exceeds u32 range)".to_string()
+    })?;
     let entry_count = u16::try_from(entries.len())
         .map_err(|_| "too many portable ZIP entries (exceeds u16 range)".to_string())?;
     out.extend_from_slice(&central);
@@ -920,10 +946,8 @@ mod tests {
             "{}",
         )
         .expect("pack");
-        let base = std::env::temp_dir().join(format!(
-            "rustpacker-symlink-test-{}",
-            std::process::id()
-        ));
+        let base =
+            std::env::temp_dir().join(format!("rustpacker-symlink-test-{}", std::process::id()));
         let outside = base.join("outside");
         let dest = base.join("dest");
         std::fs::create_dir_all(&outside).expect("mkdir outside");
@@ -950,7 +974,10 @@ mod tests {
     fn zip_entry_names_are_normalised() {
         let zip = write_stored_zip(&[("./a\\b.txt", b"x")]).expect("zip");
         // The stored name is the canonical forward-slash form.
-        assert!(zip.windows(5).any(|w| w == b"a/b.t"), "zip should store a/b.txt");
+        assert!(
+            zip.windows(5).any(|w| w == b"a/b.t"),
+            "zip should store a/b.txt"
+        );
     }
 
     #[test]
@@ -974,8 +1001,12 @@ mod tests {
 
     #[test]
     fn pack_rejects_missing_reserved_and_roundtrips_config() {
-        let exe = pack_files(&stub(), vec![("a.txt".into(), b"hello".to_vec())], "{\"k\":1}")
-            .expect("pack");
+        let exe = pack_files(
+            &stub(),
+            vec![("a.txt".into(), b"hello".to_vec())],
+            "{\"k\":1}",
+        )
+        .expect("pack");
         let manifest = read_manifest(&exe).expect("manifest");
         assert_eq!(manifest.files.len(), 1);
         assert_eq!(manifest.config_json.as_deref(), Some("{\"k\":1}"));

@@ -7,8 +7,8 @@
 
 use rustpacker_core::payload::{sha256_hex, sha256sums_txt, write_stored_zip};
 use rustpacker_core::{
-    extract_payload, find_payload, pack_directory, read_manifest, safe_file_name,
-    PayloadManifest, ProjectConfig,
+    extract_payload, find_payload, pack_directory, read_manifest, safe_file_name, PayloadManifest,
+    ProjectConfig,
 };
 use std::fs;
 use std::io::Write;
@@ -368,7 +368,6 @@ fn join_out(dir: &Path, name: &str) -> PathBuf {
         dir.join(name)
     }
 }
-
 
 /// Walk a source directory and read every file, sorted by path, with
 /// forward-slash relative paths — the same walk the packer performs.

@@ -231,7 +231,10 @@ fn unknown_project_field_is_rejected() {
     let project = dir.join("p.toml");
     fs::write(
         &project,
-        PROJECT_TOML.replace("[tray]\nsupports_tray = true", "[tray]\nsuports_tray = true"),
+        PROJECT_TOML.replace(
+            "[tray]\nsupports_tray = true",
+            "[tray]\nsuports_tray = true",
+        ),
     )
     .expect("write project");
     let project_s = project.to_string_lossy().into_owned();

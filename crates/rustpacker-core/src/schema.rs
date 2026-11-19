@@ -450,7 +450,6 @@ impl Default for ProjectConfig {
     }
 }
 
-
 /// True when `name` is a single bare file name (no directory
 /// separators, no drive/ADS `:` , no `..`, no reserved device name,
 /// no trailing dot/space, no controls). Used to validate
@@ -466,7 +465,10 @@ pub fn is_bare_filename(name: &str) -> bool {
     if name.chars().any(|c| (c as u32) < 0x20 || c as u32 == 0x7f) {
         return false;
     }
-    if name.chars().any(|c| matches!(c, '<' | '>' | '"' | '|' | '?' | '*')) {
+    if name
+        .chars()
+        .any(|c| matches!(c, '<' | '>' | '"' | '|' | '?' | '*'))
+    {
         return false;
     }
     if name.ends_with('.') || name.ends_with(' ') {
@@ -609,14 +611,12 @@ impl ProjectConfig {
         }
         if self.app.version.trim().is_empty() {
             errs.push("app.version must not be empty".into());
-        } else if self
-            .app
-            .version
-            .chars()
-            .any(|c| matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || (c as u32) < 0x20)
-        {
+        } else if self.app.version.chars().any(|c| {
+            matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || (c as u32) < 0x20
+        }) {
             errs.push(
-                "app.version must not contain path separators or Windows-forbidden characters".into(),
+                "app.version must not contain path separators or Windows-forbidden characters"
+                    .into(),
             );
         }
         if self.app.app_id.trim().is_empty()
@@ -645,7 +645,9 @@ impl ProjectConfig {
             errs.push("install.default_dir must not be empty".into());
         }
         if self.install.min_windows_build > 100_000 {
-            errs.push("install.min_windows_build is implausibly large (Windows 11 is 22000)".into());
+            errs.push(
+                "install.min_windows_build is implausibly large (Windows 11 is 22000)".into(),
+            );
         }
         if self.typewriter_interval_ms == 0 || self.typewriter_interval_ms > 1000 {
             errs.push("typewriter_interval_ms must be between 1 and 1000".into());
@@ -695,15 +697,15 @@ impl ProjectConfig {
                 errs.push("registry key must not be empty".into());
             }
             if r.name.trim().is_empty() {
-                errs.push(format!("registry entry for key '{}' has an empty value name", r.key));
+                errs.push(format!(
+                    "registry entry for key '{}' has an empty value name",
+                    r.key
+                ));
             }
             let machine_capable = matches!(
                 self.install.scope,
                 InstallScope::PerMachine | InstallScope::DualMode
-            ) || self
-                .path_scope
-                .trim()
-                .eq_ignore_ascii_case("machine");
+            ) || self.path_scope.trim().eq_ignore_ascii_case("machine");
             if r.root == "HKLM" && !machine_capable {
                 errs.push(format!(
                     "registry entry '{}' targets HKLM, which needs install.scope = \"per-machine\" (or \"dual-mode\")",
@@ -749,7 +751,10 @@ impl ProjectConfig {
                 errs.push("prerequisite name must not be empty".into());
             }
             if pr.message.trim().is_empty() {
-                errs.push(format!("prerequisite '{}' message must not be empty", pr.name));
+                errs.push(format!(
+                    "prerequisite '{}' message must not be empty",
+                    pr.name
+                ));
             }
             if pr.registry_probe.trim().is_empty() && pr.file_probe.trim().is_empty() {
                 errs.push(format!(
@@ -896,7 +901,9 @@ mod tests {
 
     #[test]
     fn unknown_fields_are_rejected() {
-        let err = ProjectConfig::from_toml("schema_version = 1\n[app]\nname = \"X\"\nsuports_tray = true\n");
+        let err = ProjectConfig::from_toml(
+            "schema_version = 1\n[app]\nname = \"X\"\nsuports_tray = true\n",
+        );
         assert!(err.is_err(), "typo field must fail to parse: {err:?}");
         let err = ProjectConfig::from_toml("schema_version = 1\nbogus_key = 1\n");
         assert!(err.is_err(), "unknown top-level key must fail: {err:?}");
