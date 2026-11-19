@@ -17,29 +17,27 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
-          components: rustfmt
 
-      - name: Registry symbol location
+      - name: Registry module gating + full build output
         shell: bash
         run: |
           set +e
-          ROOT=$(rustc --print sysroot)/lib/rustlib/src/rust
-          echo "src root: $ROOT"
-          # Try to fetch the windows-sys source used by the lockfile.
           cargo fetch -q 2>/dev/null
           WS=$(find ~/.cargo/registry/src -maxdepth 2 -name 'windows-sys-0.61*' | head -n 1)
-          echo "windows-sys: $WS"
           {
-            echo '<!-- rustpacker-regdiag -->'
+            echo '<!-- rustpacker-regdiag2 -->'
+            echo '### registry module head'
             echo '```'
-            if [ -n "$WS" ]; then
-              echo "--- files mentioning RegCreateKeyExW ---"
-              grep -rn "RegCreateKeyExW" "$WS/src" | head -n 20
-              echo "--- features list containing Registry ---"
-              sed -n '/^\[features\]/,$p' "$WS/Cargo.toml" | grep -n "Registry\|RealFunc" | head -n 20
-            else
-              echo "windows-sys source not found"
-            fi
+            sed -n '1,20p' "$WS/src/Windows/Win32/System/Registry/mod.rs"
+            echo '```'
+            echo '### Registry feature definition (context)'
+            echo '```'
+            grep -n -B2 -A2 '^Win32_System_Registry' "$WS/Cargo.toml"
+            echo '```'
+            echo '### clippy'
+            echo '```'
+            cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc 2>&1 \
+              | grep -vE '^\s+(Compiling|Checking|Finished|Downloading|Downloaded|Updating|Blocking)' | head -n 300
             echo '```'
           } > diag.md
           cat diag.md
@@ -49,6 +47,5 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          sed -i 's/<!-- rustpacker-regdiag -->/<!-- rustpacker-regdiag -->/' diag.md
           head -c 60000 diag.md > diag-truncated.md
-          gh pr comment 1 --body-file diag-truncated.md --edit-last 2>/dev/null || gh pr comment 1 --body-file diag-truncated.md
+          gh pr comment 1 --body-file diag-truncated.md
