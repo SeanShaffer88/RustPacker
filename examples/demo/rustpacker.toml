@@ -1,0 +1,46 @@
+schema_version = 1
+typewriter_interval_ms = 12
+path_scope = ""
+
+[app]
+name = "Demo App"
+version = "0.1.0"
+publisher = "Sean Shaffer"
+app_id = "RustPackerDemo"
+main_exe = "DemoApp.exe"
+description = "A tiny demo package for RustPacker."
+
+[install]
+scope = "per-user"
+default_dir = "{per-user-programs}"
+source_dir = "payload"
+license_file = ""
+require_admin = false
+min_windows_build = 22000
+
+[tray]
+supports_tray = true
+tray_arg = "--tray"
+startup_tray_arg = ""
+
+[finish]
+hide_desktop_shortcut = false
+hide_launch_after_setup = false
+desktop_shortcut_default = true
+launch_after_setup_default = true
+launch_tray_default = false
+launch_at_login_default = false
+login_tray_default = true
+
+[theme]
+background_hex = "#282C34"
+surface_hex = "#21252B"
+elevated_surface_hex = "#2C313A"
+border_hex = "#181A1F"
+accent_hex = "#E06C75"
+success_hex = "#98C379"
+warning_hex = "#E5C07B"
+info_hex = "#61AFEF"
+text_hex = "#ABB2BF"
+muted_hex = "#5C6370"
+cursor_hex = "#528BFF"
