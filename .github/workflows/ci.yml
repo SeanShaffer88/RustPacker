@@ -1,0 +1,19 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  windows-msvc:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Test (host target on Windows runner)
+        run: cargo test --workspace
+      - name: Build release (x86_64-pc-windows-msvc, crt-static)
+        run: cargo build --release --target x86_64-pc-windows-msvc --workspace
+      - name: Show binaries
+        run: dir target\x86_64-pc-windows-msvc\release\*.exe
