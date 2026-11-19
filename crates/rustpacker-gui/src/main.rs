@@ -24,7 +24,9 @@ fn main() {
 #[cfg(windows)]
 mod win {
     use rustpacker_core::payload::{pack_directory, sha256_hex, sha256sums_txt};
-    use rustpacker_core::{FinishScreenModel, InstallScope, ProjectConfig, TerminalTheme};
+    use rustpacker_core::{
+        safe_file_name, FinishScreenModel, InstallScope, ProjectConfig, TerminalTheme,
+    };
     use std::path::PathBuf;
 
     use windows_sys::Win32::Foundation::{
@@ -102,6 +104,20 @@ mod win {
     const PAGE_FINISH: usize = 2;
 
     // ---- small helpers -----------------------------------------------------
+
+    /// Same structural PE check the CLI uses before packing: `MZ`, a
+    /// plausible `e_lfanew`, and a `PE\0\0` signature.
+    fn looks_like_pe(bytes: &[u8]) -> bool {
+        if bytes.len() < 0x40 || &bytes[0..2] != b"MZ" {
+            return false;
+        }
+        let lfanew =
+            u32::from_le_bytes([bytes[0x3C], bytes[0x3D], bytes[0x3E], bytes[0x3F]]) as usize;
+        if lfanew < 0x40 || lfanew.checked_add(4).map_or(true, |end| end > bytes.len()) {
+            return false;
+        }
+        &bytes[lfanew..lfanew + 4] == b"PE\0\0"
+    }
 
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -1087,10 +1103,11 @@ mod win {
     // ---- live preview ---------------------------------------------------------------
 
     fn scope_label(scope: InstallScope) -> &'static str {
-        match scope {
-            InstallScope::PerUser => "Per-User",
+        // Dual-Mode is shown with the scope it actually installs as on
+        // this machine (per-machine only when the installer can elevate).
+        match scope.resolve(false) {
             InstallScope::PerMachine => "Per-Machine",
-            InstallScope::DualMode => "Dual-Mode",
+            _ => "Per-User",
         }
     }
 
@@ -1364,12 +1381,26 @@ mod win {
             Ok(text) => match ProjectConfig::from_toml(&text) {
                 Err(e) => set_status(app, &format!("Could not load project:\n{e}")),
                 Ok(cfg) => {
+                    // Load even when validation complains: the user needs
+                    // the fields in front of them to fix the problem. The
+                    // problems are shown instead of being silently kept.
+                    let problems = cfg.validate();
                     app.cfg = cfg;
                     app.project_path = Some(path.clone());
                     app.last_model = None;
                     apply_config_to_ui(app);
                     refresh_preview(app);
-                    set_status(app, &format!("Loaded project from {}", path.display()));
+                    let mut status = format!("Loaded project from {}", path.display());
+                    if !problems.is_empty() {
+                        status.push_str(&format!(
+                            "\n\nThis project has {} problem(s) to fix before building:",
+                            problems.len()
+                        ));
+                        for p in &problems {
+                            status.push_str(&format!("\n- {p}"));
+                        }
+                    }
+                    set_status(app, &status);
                 }
             },
         }
@@ -1424,6 +1455,18 @@ mod win {
         let src = resolve_dir(app, &app.cfg.install.source_dir);
         if !src.is_dir() {
             errs.push(format!("source directory not found: {}", src.display()));
+        } else if !src.join(app.cfg.app.main_exe.trim()).is_file() {
+            errs.push(format!(
+                "app.main_exe '{}' was not found in {}",
+                app.cfg.app.main_exe,
+                src.display()
+            ));
+        }
+        if !app.cfg.install.license_file.trim().is_empty() {
+            let license = resolve_dir(app, &app.cfg.install.license_file);
+            if !license.is_file() {
+                errs.push(format!("license file not found: {}", license.display()));
+            }
         }
         errs
     }
@@ -1465,32 +1508,31 @@ mod win {
         Err("rustpacker-stub.exe was not found next to the Builder Studio, and the Stub path field is empty.".to_string())
     }
 
-    fn sanitize_filename(name: &str) -> String {
-        let cleaned: String = name
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.') {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
-        let trimmed = cleaned.trim().to_string();
-        if trimmed.is_empty() {
-            "App".to_string()
-        } else {
-            trimmed
-        }
-    }
-
     fn build_setup(app: &App) -> Result<String, String> {
         let stub_path = resolve_stub(app)?;
         let stub = std::fs::read(&stub_path)
             .map_err(|e| format!("could not read stub {}: {e}", stub_path.display()))?;
+        if !looks_like_pe(&stub) {
+            return Err(format!(
+                "{} is not a Windows executable (no MZ/PE headers). Select the RustPacker stub binary.",
+                stub_path.display()
+            ));
+        }
         let source = resolve_dir(app, &app.cfg.install.source_dir);
         let config_json = app.cfg.to_json()?;
         let (exe, entries) = pack_directory(&stub, &source, &config_json)?;
+        // The installer launches app.main_exe: if it is not in the payload
+        // the build is broken even though packing "succeeded".
+        if !entries
+            .iter()
+            .any(|e| e.path.eq_ignore_ascii_case(app.cfg.app.main_exe.trim()))
+        {
+            return Err(format!(
+                "app.main_exe '{}' is not in the payload from {}.\n\nCheck the source directory.",
+                app.cfg.app.main_exe,
+                source.display()
+            ));
+        }
         let out_dir = resolve_dir(app, &app.output_dir);
         std::fs::create_dir_all(&out_dir).map_err(|e| {
             format!(
@@ -1498,10 +1540,13 @@ mod win {
                 out_dir.display()
             )
         })?;
+        // Both components use the shared sanitiser: an unvalidated
+        // version string (e.g. `1.0/../../evil`) must never be able to
+        // steer the output path out of the chosen folder.
         let setup_name = format!(
             "{}-v{}-Setup.exe",
-            sanitize_filename(&app.cfg.app.name),
-            app.cfg.app.version
+            safe_file_name(&app.cfg.app.name),
+            safe_file_name(&app.cfg.app.version)
         );
         let setup_path = out_dir.join(&setup_name);
         std::fs::write(&setup_path, &exe)

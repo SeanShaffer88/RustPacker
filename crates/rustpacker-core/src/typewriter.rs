@@ -2,6 +2,11 @@
 //!
 //! The stub drives this from a Win32 timer; all timing and skip logic
 //! lives here so it can be unit-tested without a window.
+//!
+//! Text is revealed by Unicode scalar (`char`), not by grapheme
+//! cluster: combining sequences and ZWJ emoji may briefly render
+//! split. This is a deliberate dependency-free trade-off; wizard
+//! copy avoids such sequences.
 
 /// Default reveal interval from the confirmed brief.
 pub const DEFAULT_INTERVAL_MS: u32 = 12;
@@ -84,6 +89,17 @@ impl Typewriter {
         self.revealed = 0;
         self.carry_ms = 0;
         self.complete = self.chars.is_empty();
+    }
+
+    /// Like [`reset`](Self::reset) but also replaces the interval
+    /// (0 falls back to [`DEFAULT_INTERVAL_MS`]).
+    pub fn reset_with_interval(&mut self, text: &str, interval_ms: u32) {
+        self.interval_ms = if interval_ms == 0 {
+            DEFAULT_INTERVAL_MS
+        } else {
+            interval_ms
+        };
+        self.reset(text);
     }
 }
 

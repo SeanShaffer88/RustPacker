@@ -68,9 +68,16 @@ fn json_value(output: &Output) -> Value {
     serde_json::from_str(&stdout(output)).expect("stdout should be JSON")
 }
 
+/// A minimal, *plausible* PE image: `MZ` stub, e_lfanew at 0x3C, and a
+/// `PE\0\0` signature there. `pack` now rejects anything that is not a
+/// Windows executable, so tests need a header that passes that check.
 fn stub_bytes() -> Vec<u8> {
-    let mut v = b"MZ".to_vec();
-    v.extend(std::iter::repeat(0u8).take(512));
+    let mut v = vec![0u8; 512];
+    v[0] = b'M';
+    v[1] = b'Z';
+    // e_lfanew (u32 LE at 0x3C) -> 0x40
+    v[0x3C..0x40].copy_from_slice(&0x40u32.to_le_bytes());
+    v[0x40..0x44].copy_from_slice(b"PE\0\0");
     v
 }
 
@@ -189,6 +196,81 @@ fn init_creates_file_that_validate_accepts() {
     assert_eq!(v["ok"].as_bool(), Some(true));
     assert_eq!(v["command"].as_str(), Some("validate"));
     assert_eq!(v["app"].as_str(), Some("My App"));
+    // Filesystem checks are reported as warnings, not silence.
+    assert!(v["warnings"].is_array(), "warnings array present: {v}");
+}
+
+#[test]
+fn validate_reports_missing_source_dir_and_license() {
+    let dir = TempDir::new("missing");
+    let project = dir.join("p.toml");
+    fs::write(
+        &project,
+        PROJECT_TOML.replace("license_file = \"\"", "license_file = \"LICENSE.txt\""),
+    )
+    .expect("write project");
+    let project_s = project.to_string_lossy().into_owned();
+    let out = run(&["validate", &project_s]);
+    // Still exit 0: the project file itself is valid, but the human output
+    // must name both problems before `pack` fails on them.
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("source directory not found"), "{text}");
+    assert!(text.contains("license file not found"), "{text}");
+    let v = json_value(&run(&["validate", &project_s, "--json"]));
+    assert_eq!(v["warnings"].as_array().map(|a| a.len()), Some(2), "{v}");
+}
+
+#[test]
+fn unknown_project_field_is_rejected() {
+    let dir = TempDir::new("typo");
+    let project = dir.join("p.toml");
+    fs::write(
+        &project,
+        PROJECT_TOML.replace("[tray]\nsupports_tray = true", "[tray]\nsuports_tray = true"),
+    )
+    .expect("write project");
+    let project_s = project.to_string_lossy().into_owned();
+    let out = run(&["validate", &project_s]);
+    assert_eq!(out.status.code(), Some(3), "stderr: {}", stderr(&out));
+    assert!(stderr(&out).contains("suports_tray"), "{}", stderr(&out));
+}
+
+#[test]
+fn extract_refuses_non_empty_dir_without_force() {
+    let dir = TempDir::new("extract-force");
+    let (project, stub) = write_fixture(&dir);
+    let out_dir = dir.join("out");
+    let out = run(&[
+        "pack",
+        project.to_str().expect("path"),
+        "--stub",
+        stub.to_str().expect("path"),
+        "--out-dir",
+        out_dir.to_str().expect("path"),
+    ]);
+    assert!(out.status.success(), "pack failed: {}", stderr(&out));
+    let setup = out_dir.join("TestApp-v1.2.3-Setup.exe");
+    let first = dir.join("first");
+    fs::create_dir_all(&first).expect("mkdir");
+    fs::write(first.join("keep.txt"), b"do not clobber").expect("write");
+    let out = run(&[
+        "extract",
+        setup.to_str().expect("path"),
+        "--out",
+        first.to_str().expect("path"),
+    ]);
+    assert_eq!(out.status.code(), Some(4), "stdout: {}", stdout(&out));
+    assert!(stderr(&out).contains("not empty"), "{}", stderr(&out));
+    // --force allows it.
+    let out = run(&[
+        "extract",
+        setup.to_str().expect("path"),
+        "--out",
+        first.to_str().expect("path"),
+        "--force",
+    ]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
 }
 
 #[test]

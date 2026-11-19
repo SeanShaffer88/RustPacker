@@ -10,10 +10,13 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
+# 1.70 is where std::sync::OnceLock stabilised; the workspace uses it.
+rust-version = "1.70"
 license = "MIT"
 authors = ["Sean Shaffer"]
 
 [profile.release]
+# Size-first: the stub is copied into every installer payload.
 opt-level = "z"
 lto = true
 codegen-units = 1
