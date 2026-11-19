@@ -15,34 +15,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-msvc
 
-      - name: Registry module gating + full build output
+      - name: clippy + test with full output
         shell: bash
         run: |
           set +e
-          cargo fetch -q 2>/dev/null
-          WS=$(find ~/.cargo/registry/src -maxdepth 2 -name 'windows-sys-0.61*' | head -n 1)
           {
-            echo '<!-- rustpacker-regdiag2 -->'
-            echo '### registry module head'
-            echo '```'
-            sed -n '1,20p' "$WS/src/Windows/Win32/System/Registry/mod.rs"
-            echo '```'
-            echo '### Registry feature definition (context)'
-            echo '```'
-            grep -n -B2 -A2 '^Win32_System_Registry' "$WS/Cargo.toml"
-            echo '```'
+            echo '<!-- rustpacker-diag3 -->'
             echo '### clippy'
             echo '```'
-            cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc 2>&1 \
-              | grep -vE '^\s+(Compiling|Checking|Finished|Downloading|Downloaded|Updating|Blocking)' | head -n 300
+            cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings 2>&1 \
+              | grep -vE '^\s+(Compiling|Checking|Finished|Downloading|Downloaded|Updating|Blocking)' | head -n 400
+            echo '```'
+            echo '### test'
+            echo '```'
+            cargo test --workspace 2>&1 | tail -n 200
             echo '```'
           } > diag.md
-          cat diag.md
+          wc -c diag.md
 
       - name: Post diagnostics as a PR comment
+        if: always()
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

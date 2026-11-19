@@ -887,8 +887,10 @@ mod tests {
 
     #[test]
     fn newer_schema_is_rejected() {
-        let mut cfg = ProjectConfig::default();
-        cfg.schema_version = CURRENT_SCHEMA_VERSION + 1;
+        let mut cfg = ProjectConfig {
+            schema_version: CURRENT_SCHEMA_VERSION + 1,
+            ..Default::default()
+        };
         assert!(cfg.migrate().is_err());
     }
 

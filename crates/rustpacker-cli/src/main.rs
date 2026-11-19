@@ -89,10 +89,7 @@ impl Fail {
     fn usage(command: Option<&str>, message: &str) -> Self {
         Self {
             code: EXIT_USAGE,
-            command: match command {
-                Some(c) => Some(c.to_string()),
-                None => None,
-            },
+            command: command.map(str::to_string),
             errors: vec![message.to_string()],
         }
     }
@@ -255,11 +252,10 @@ fn json_string_array(items: &[String]) -> String {
 /// Split `args` into positionals, valued options (`--name value` or
 /// `--name=value`), and boolean flags (`--flag`). Names in `valued` /
 /// `boolean` are given without the leading dashes.
-fn parse_args(
-    args: &[String],
-    valued: &[&str],
-    boolean: &[&str],
-) -> Result<(Vec<String>, Vec<(String, String)>, Vec<String>), String> {
+/// Positionals, `--name value` pairs, and boolean flags, in that order.
+type ParsedArgs = (Vec<String>, Vec<(String, String)>, Vec<String>);
+
+fn parse_args(args: &[String], valued: &[&str], boolean: &[&str]) -> Result<ParsedArgs, String> {
     let mut positional: Vec<String> = Vec::new();
     let mut values: Vec<(String, String)> = Vec::new();
     let mut flags: Vec<String> = Vec::new();
@@ -862,9 +858,8 @@ fn cmd_pack(args: &[String]) -> Result<CmdOk, Fail> {
 
     let sums_name = "SHA256SUMS.txt".to_string();
     let mut sum_items: Vec<(&str, &[u8])> = vec![(setup_name.as_str(), setup_bytes.as_slice())];
-    match &portable_name {
-        Some(name) => sum_items.push((name.as_str(), portable_bytes.as_slice())),
-        None => {}
+    if let Some(name) = &portable_name {
+        sum_items.push((name.as_str(), portable_bytes.as_slice()));
     }
     let sums_text = sha256sums_txt(&sum_items);
     let sums_path = join_out(&out_dir, &sums_name);
@@ -885,9 +880,8 @@ fn cmd_pack(args: &[String]) -> Result<CmdOk, Fail> {
         "Packed {} v{}\n  Setup: {setup_display} ({file_count} files, {total_bytes} payload bytes)\n",
         cfg.app.name, cfg.app.version
     );
-    match &portable_path {
-        Some(p) => human.push_str(&format!("  Portable: {}\n", p.display())),
-        None => {}
+    if let Some(p) = &portable_path {
+        human.push_str(&format!("  Portable: {}\n", p.display()));
     }
     human.push_str(&format!("  Checksums: {sums_display}\n"));
 
@@ -984,9 +978,8 @@ fn setup_report(command: &str, path: &str, bytes: &[u8], manifest: &PayloadManif
     let mut human = String::new();
     if command == "verify" {
         human.push_str(&format!("Verified: {path}\n"));
-        match (&app, &version) {
-            (Some(a), Some(v)) => human.push_str(&format!("App: {a} v{v}\n")),
-            _ => {}
+        if let (Some(a), Some(v)) = (&app, &version) {
+            human.push_str(&format!("App: {a} v{v}\n"));
         }
         if !payload_sha.is_empty() {
             human.push_str(&format!("Payload SHA-256: {payload_sha}\n"));

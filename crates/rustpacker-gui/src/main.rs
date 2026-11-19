@@ -1304,12 +1304,10 @@ mod win {
                 app.pv_login_tray_on = get_check(app.c.pv_login_tray);
                 refresh_preview(app);
             }
-            ID_PV_BTN_PAGE => {
-                if app.page < PAGE_FINISH {
-                    app.page += 1;
-                    combo_set_sel(app.c.cb_page, app.page as i32);
-                    refresh_preview(app);
-                }
+            ID_PV_BTN_PAGE if app.page < PAGE_FINISH => {
+                app.page += 1;
+                combo_set_sel(app.c.cb_page, app.page as i32);
+                refresh_preview(app);
             }
             _ => {}
         }

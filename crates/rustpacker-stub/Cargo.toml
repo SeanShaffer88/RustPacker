@@ -18,6 +18,8 @@ rustpacker-core = { path = "../rustpacker-core" }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    # Required by RegCreateKeyExW (windows-sys gates it behind Security).
+    "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_LibraryLoader",
