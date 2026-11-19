@@ -1,0 +1,26 @@
+[package]
+name = "rustpacker-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "RustPacker Builder Studio."
+
+[[bin]]
+name = "rustpacker-gui"
+path = "src/main.rs"
+
+[dependencies]
+rustpacker-core = { path = "../rustpacker-core" }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Controls",
+    "Win32_UI_Controls_Dialogs",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
