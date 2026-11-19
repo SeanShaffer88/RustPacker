@@ -1,0 +1,62 @@
+name: Debug CI
+
+on:
+  push:
+    branches: [arena/6b18f778-rustpacker]
+  workflow_dispatch:
+
+jobs:
+  diag:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+          components: rustfmt, clippy
+
+      - name: fmt (annotated)
+        shell: bash
+        run: |
+          set +e
+          cargo fmt --all -- --check > fmt.log 2>&1
+          echo "exit=$?" >> fmt.log
+          # rustfmt prints a unified diff; surface the file headers.
+          grep -E '^Diff in|^error|^warning' fmt.log | head -n 10 | while IFS= read -r line; do
+            echo "::error::$line"
+          done
+          cat fmt.log
+
+      - name: clippy (annotated)
+        shell: bash
+        run: |
+          set +e
+          cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc 2>&1 | tee clippy.log
+          echo "--- compiler diagnostics ---"
+          grep -E '^(error|warning)(\[|:)' clippy.log | sort -u | head -n 10 | while IFS= read -r line; do
+            echo "::error::$line"
+          done
+          grep -E '^\s+--> ' clippy.log | sort -u | head -n 10 | while IFS= read -r line; do
+            echo "::error::$line"
+          done
+
+      - name: test (annotated)
+        shell: bash
+        run: |
+          set +e
+          cargo test --workspace > test.log 2>&1
+          echo "exit=$?" >> test.log
+          grep -E '^(error|warning)(\[|:)|panicked at|FAILED|failures:' test.log | sort -u | head -n 10 | while IFS= read -r line; do
+            echo "::error::$line"
+          done
+          tail -n 40 test.log
+
+      - name: upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diag-logs
+          path: |
+            fmt.log
+            clippy.log
+            test.log
