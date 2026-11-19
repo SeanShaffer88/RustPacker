@@ -187,7 +187,11 @@ fn init_creates_file_that_validate_accepts() {
 
     let out = run(&["validate", &project_s]);
     assert!(out.status.success(), "validate failed: {}", stderr(&out));
-    assert!(stdout(&out).contains("Valid"));
+    assert!(
+        stdout(&out).starts_with("Valid:"),
+        "validate output: {}",
+        stdout(&out)
+    );
 
     // --json after the command is also accepted.
     let out = run(&["validate", &project_s, "--json"]);

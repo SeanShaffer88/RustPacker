@@ -671,19 +671,15 @@ fn cmd_validate(args: &[String]) -> Result<CmdOk, Fail> {
             warnings.push(format!("license file not found: {}", license.display()));
         }
     }
-    let human = if warnings.is_empty() {
-        format!("Valid: {path} - {} v{}\n", cfg.app.name, cfg.app.version)
-    } else {
-        let mut text = format!(
-            "Project file is valid: {path} - {} v{}\n\
-             These will stop `pack` until fixed:\n",
-            cfg.app.name, cfg.app.version
-        );
+    // Keep the "Valid:" prefix stable for scripts; extra filesystem
+    // warnings are appended rather than replacing it.
+    let mut human = format!("Valid: {path} - {} v{}\n", cfg.app.name, cfg.app.version);
+    if !warnings.is_empty() {
+        human.push_str("Note: these will stop `pack` until fixed:\n");
         for w in &warnings {
-            text.push_str(&format!("  - {w}\n"));
+            human.push_str(&format!("  - {w}\n"));
         }
-        text
-    };
+    }
     let json = format!(
         "{{\"ok\":true,\"command\":\"validate\",\"path\":{},\"app\":{},\"version\":{},\"warnings\":{},\"errors\":[]}}",
         json_str(path),
