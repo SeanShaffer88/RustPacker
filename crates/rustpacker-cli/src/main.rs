@@ -1,0 +1,948 @@
+//! `rustpacker-cli` — command-line packager for RustPacker.
+//!
+//! Thin surface over `rustpacker-core`: it reads a project file, checks
+//! it, packs a payload onto a stub executable, and can verify, list, and
+//! extract the resulting `Setup.exe`. Argument parsing is hand-rolled
+//! (standard library only); `--json` selects machine-readable output.
+
+use rustpacker_core::payload::{sha256_hex, sha256sums_txt, write_stored_zip};
+use rustpacker_core::{
+    extract_payload, find_payload, pack_directory, read_manifest, PayloadManifest, ProjectConfig,
+};
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+const EXIT_OK: i32 = 0;
+const EXIT_USAGE: i32 = 2;
+const EXIT_VALIDATION: i32 = 3;
+const EXIT_IO: i32 = 4;
+
+const HELP: &str = r#"RustPacker CLI - pack a project into a Windows Setup.exe.
+
+Usage:
+  rustpacker-cli [--json] <command> [options]
+
+Commands:
+  init [--out <file>] [--force]
+      Write an example project file (default: rustpacker.toml).
+  validate <project.toml>
+      Check a project file and list every problem found.
+  pack <project.toml> --stub <stub.exe> [--out-dir <dir>] [--portable]
+      Build <App>-v<version>-Setup.exe plus SHA256SUMS.txt; with
+      --portable also build <App>-v<version>-Portable.zip.
+  verify <Setup.exe>
+      Check the payload checksums and list the packed files.
+  list <Setup.exe>
+      List the files packed in a Setup.exe.
+  extract <Setup.exe> --out <dir>
+      Extract the packed files to a directory.
+  schema
+      Print the example project file (TOML) to standard output.
+  help
+      Show this help.
+
+Options:
+  --json
+      Print machine-readable JSON for init, validate, pack, verify,
+      list, and extract. May appear before or after the command.
+
+Exit codes:
+  0  success
+  2  usage error
+  3  project validation failed
+  4  input/output or payload error
+
+Examples:
+  rustpacker-cli init
+  rustpacker-cli validate rustpacker.toml
+  rustpacker-cli pack rustpacker.toml --stub stub.exe --out-dir dist --portable
+  rustpacker-cli --json verify dist/TestApp-v1.2.3-Setup.exe
+  rustpacker-cli extract dist/TestApp-v1.2.3-Setup.exe --out unpacked
+"#;
+
+// ---------------------------------------------------------------------------
+// Result plumbing
+
+struct CmdOk {
+    human: String,
+    json: Option<String>,
+}
+
+struct Output {
+    code: i32,
+    stdout: String,
+    stderr: String,
+}
+
+struct Fail {
+    code: i32,
+    command: Option<String>,
+    errors: Vec<String>,
+}
+
+impl Fail {
+    fn usage(command: Option<&str>, message: &str) -> Self {
+        Self {
+            code: EXIT_USAGE,
+            command: match command {
+                Some(c) => Some(c.to_string()),
+                None => None,
+            },
+            errors: vec![message.to_string()],
+        }
+    }
+
+    fn validation(command: &str, errors: Vec<String>) -> Self {
+        Self {
+            code: EXIT_VALIDATION,
+            command: Some(command.to_string()),
+            errors,
+        }
+    }
+
+    fn io(command: &str, message: String) -> Self {
+        Self {
+            code: EXIT_IO,
+            command: Some(command.to_string()),
+            errors: vec![message],
+        }
+    }
+}
+
+fn error_text(fail: &Fail) -> String {
+    if fail.errors.len() == 1 {
+        format!("error: {}\n", fail.errors[0])
+    } else {
+        let mut out = String::from("error:\n");
+        for e in &fail.errors {
+            out.push_str(&format!("  - {e}\n"));
+        }
+        out
+    }
+}
+
+fn error_json(fail: &Fail) -> String {
+    let command = match &fail.command {
+        Some(c) => json_str(c),
+        None => "null".to_string(),
+    };
+    format!(
+        "{{\"ok\":false,\"command\":{command},\"errors\":{}}}",
+        json_string_array(&fail.errors)
+    )
+}
+
+fn run(args: &[String], json: bool) -> Output {
+    match dispatch(args) {
+        Ok(ok) => {
+            let stdout = match (json, ok.json) {
+                (true, Some(j)) => format!("{j}\n"),
+                _ => ok.human,
+            };
+            Output {
+                code: EXIT_OK,
+                stdout,
+                stderr: String::new(),
+            }
+        }
+        Err(fail) => {
+            if json {
+                Output {
+                    code: fail.code,
+                    stdout: format!("{}\n", error_json(&fail)),
+                    stderr: String::new(),
+                }
+            } else {
+                Output {
+                    code: fail.code,
+                    stdout: String::new(),
+                    stderr: error_text(&fail),
+                }
+            }
+        }
+    }
+}
+
+fn emit_stdout(text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    let stdout = std::io::stdout();
+    let mut lock = stdout.lock();
+    let _ = lock.write_all(text.as_bytes());
+    let _ = lock.flush();
+}
+
+fn emit_stderr(text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    let stderr = std::io::stderr();
+    let mut lock = stderr.lock();
+    let _ = lock.write_all(text.as_bytes());
+    let _ = lock.flush();
+}
+
+fn real_main() -> i32 {
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    let mut json = false;
+    let mut args: Vec<String> = Vec::new();
+    for arg in raw {
+        if arg == "--json" {
+            json = true;
+        } else {
+            args.push(arg);
+        }
+    }
+    let output = run(&args, json);
+    emit_stdout(&output.stdout);
+    emit_stderr(&output.stderr);
+    output.code
+}
+
+fn main() {
+    std::process::exit(real_main());
+}
+
+// ---------------------------------------------------------------------------
+// JSON helpers (small, dependency-free)
+
+fn json_str(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for c in value.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn json_string_array(items: &[String]) -> String {
+    let mut out = String::from("[");
+    for (i, item) in items.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&json_str(item));
+    }
+    out.push(']');
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Argument parsing
+
+/// Split `args` into positionals, valued options (`--name value` or
+/// `--name=value`), and boolean flags (`--flag`). Names in `valued` /
+/// `boolean` are given without the leading dashes.
+fn parse_args(
+    args: &[String],
+    valued: &[&str],
+    boolean: &[&str],
+) -> Result<(Vec<String>, Vec<(String, String)>, Vec<String>), String> {
+    let mut positional: Vec<String> = Vec::new();
+    let mut values: Vec<(String, String)> = Vec::new();
+    let mut flags: Vec<String> = Vec::new();
+    let mut i = 0usize;
+    while i < args.len() {
+        let arg = &args[i];
+        match arg.strip_prefix("--") {
+            Some(rest) => {
+                let (name, inline_value) = match rest.find('=') {
+                    Some(eq) => (&rest[..eq], Some(rest[eq + 1..].to_string())),
+                    None => (rest, None),
+                };
+                if valued.contains(&name) {
+                    let value = match inline_value {
+                        Some(v) => v,
+                        None => {
+                            i += 1;
+                            match args.get(i) {
+                                Some(v) => v.clone(),
+                                None => return Err(format!("option --{name} needs a value")),
+                            }
+                        }
+                    };
+                    values.push((name.to_string(), value));
+                } else if boolean.contains(&name) {
+                    match inline_value {
+                        Some(_) => return Err(format!("option --{name} takes no value")),
+                        None => flags.push(name.to_string()),
+                    }
+                } else {
+                    return Err(format!("unknown option --{name}"));
+                }
+            }
+            None => {
+                if arg.starts_with('-') && arg.len() > 1 {
+                    return Err(format!("unknown option {arg}"));
+                }
+                positional.push(arg.clone());
+            }
+        }
+        i += 1;
+    }
+    Ok((positional, values, flags))
+}
+
+fn opt_value(values: &[(String, String)], name: &str) -> Option<String> {
+    let mut found: Option<String> = None;
+    for (n, v) in values {
+        if n == name {
+            found = Some(v.clone());
+        }
+    }
+    found
+}
+
+fn has_flag(flags: &[String], name: &str) -> bool {
+    flags.iter().any(|f| f == name)
+}
+
+// ---------------------------------------------------------------------------
+// Path helpers
+
+/// Resolve `raw` (stub or source dir): absolute paths pass through;
+/// relative paths prefer the project directory, then the working
+/// directory, and finally fall back to the project-directory form so
+/// error messages name the most likely intended location.
+fn resolve_relative(project_dir: &Path, raw: &str) -> PathBuf {
+    let p = Path::new(raw);
+    if p.is_absolute() {
+        return p.to_path_buf();
+    }
+    let in_project = project_dir.join(p);
+    if in_project.exists() {
+        return in_project;
+    }
+    let in_cwd = PathBuf::from(raw);
+    if in_cwd.exists() {
+        return in_cwd;
+    }
+    in_project
+}
+
+fn project_dir_of(project_arg: &str) -> PathBuf {
+    match Path::new(project_arg).parent() {
+        Some(p) => p.to_path_buf(),
+        None => PathBuf::from("."),
+    }
+}
+
+/// Join an output file name onto an out-dir, keeping `.` out of the
+/// displayed path when the out-dir is the working directory.
+fn join_out(dir: &Path, name: &str) -> PathBuf {
+    if dir.as_os_str().is_empty() || dir == Path::new(".") {
+        PathBuf::from(name)
+    } else {
+        dir.join(name)
+    }
+}
+
+/// Make a file-name component: replace characters Windows forbids in
+/// file names (and control characters) with `-`.
+fn safe_file_name(raw: &str) -> String {
+    let mut out = String::new();
+    for c in raw.chars() {
+        if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || (c as u32) < 0x20 {
+            out.push('-');
+        } else {
+            out.push(c);
+        }
+    }
+    let trimmed = out.trim_matches(|c| c == '.' || c == ' ');
+    if trimmed.is_empty() {
+        "App".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Walk a source directory and read every file, sorted by path, with
+/// forward-slash relative paths — the same walk the packer performs.
+fn collect_source_files(dir: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let mut paths: Vec<PathBuf> = Vec::new();
+    collect_files(dir, &mut paths)?;
+    paths.sort();
+    let mut out = Vec::new();
+    for path in paths {
+        let rel = match path.strip_prefix(dir) {
+            Ok(r) => r.to_string_lossy().replace('\\', "/"),
+            Err(_) => return Err("internal path error".to_string()),
+        };
+        let data =
+            fs::read(&path).map_err(|e| format!("could not read {}: {e}", path.display()))?;
+        out.push((rel, data));
+    }
+    Ok(out)
+}
+
+fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+    let mut read = fs::read_dir(dir)
+        .map_err(|e| format!("could not list {}: {e}", dir.display()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("could not list {}: {e}", dir.display()))?;
+    read.sort_by_key(|e| e.file_name());
+    for entry in read {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files(&path, out)?;
+        } else if path.is_file() {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Example project file (init / schema)
+
+/// True when `line` is a top-level `name = []` entry (an empty list).
+fn is_empty_array_line(line: &str, name: &str) -> bool {
+    let trimmed = line.trim();
+    let rest = match trimmed.strip_prefix(name) {
+        Some(r) => r,
+        None => return false,
+    };
+    let rest = match rest.trim_start().strip_prefix('=') {
+        Some(r) => r,
+        None => return false,
+    };
+    rest.trim() == "[]"
+}
+
+/// Build the example project TOML from `ProjectConfig::default()`
+/// (app name "My App") with structural comments. Empty list entries are
+/// dropped from the body: the commented examples at the bottom can be
+/// enabled directly without creating a duplicate key.
+fn example_toml() -> Result<String, String> {
+    let cfg = ProjectConfig::default();
+    let raw = cfg.to_toml()?;
+    let mut out = String::new();
+    out.push_str("# RustPacker project file\n");
+    out.push_str("#\n");
+    out.push_str("# Edit the values below, then run:\n");
+    out.push_str("#   rustpacker-cli validate rustpacker.toml\n");
+    out.push_str("#   rustpacker-cli pack rustpacker.toml --stub stub.exe --portable\n");
+    out.push_str("#\n");
+    out.push_str("# Top-level keys: schema_version (1 - do not change it),\n");
+    out.push_str("# typewriter_interval_ms (wizard typing speed, 12 ms by default),\n");
+    out.push_str("# path_scope (\"\" to skip, \"user\", or \"machine\"), plus the\n");
+    out.push_str("# tables below.\n");
+    out.push('\n');
+    for line in raw.lines() {
+        if [
+            "shortcuts",
+            "registry",
+            "file_associations",
+            "prerequisites",
+            "process_checks",
+        ]
+        .iter()
+        .any(|name| is_empty_array_line(line, name))
+        {
+            continue;
+        }
+        match line {
+            "[app]" => {
+                out.push_str("# [app] - the application being installed. app_id is the stable\n");
+                out.push_str("# identifier used for the uninstall entry; main_exe is the file\n");
+                out.push_str("# inside the payload that gets launched.\n");
+            }
+            "[install]" => {
+                out.push_str("# [install] - install scope, default folder, and the payload\n");
+                out.push_str("# source directory (relative to this project file).\n");
+                out.push_str("# min_windows_build 22000 means Windows 11; 0 disables the check.\n");
+            }
+            "[tray]" => {
+                out.push_str("# [tray] - system-tray behaviour of the installed app.\n");
+                out.push_str("# When supports_tray is true, the finish page also offers\n");
+                out.push_str("# \"Start minimized to system tray\" (under Launch after setup)\n");
+                out.push_str("# and \"Launch at Windows login\". tray_arg is passed when\n");
+                out.push_str("# launching minimised - typical values are \"--tray\" or\n");
+                out.push_str("# \"--minimized\". startup_tray_arg, when set, is used for\n");
+                out.push_str("# the at-login launch instead; empty falls back to tray_arg.\n");
+            }
+            "[finish]" => {
+                out.push_str("# [finish] - which finish-page options are offered. Desktop\n");
+                out.push_str("# shortcut and launch-after-setup are always offered unless\n");
+                out.push_str("# hidden here; the tray sub-options only appear when\n");
+                out.push_str("# tray.supports_tray is true.\n");
+            }
+            "[theme]" => {
+                out.push_str(
+                    "# [theme] - One Dark Pro terminal palette for the installer wizard.\n",
+                );
+            }
+            _ => {}
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str("\n# Optional extras - remove the leading \"# \" to enable an entry.\n");
+    out.push_str("#\n");
+    out.push_str("# Shortcuts (location is \"desktop\", \"start-menu\", or a folder\n");
+    out.push_str("# under the install dir):\n");
+    out.push_str("# [[shortcuts]]\n");
+    out.push_str("# name = \"My App\"\n");
+    out.push_str("# location = \"desktop\"\n");
+    out.push_str("# target = \"MyApp.exe\"\n");
+    out.push_str("# arguments = \"\"\n");
+    out.push_str("#\n");
+    out.push_str("# Registry values written at install (root is HKCU or HKLM):\n");
+    out.push_str("# [[registry]]\n");
+    out.push_str("# root = \"HKCU\"\n");
+    out.push_str("# key = \"Software\\\\My App\"\n");
+    out.push_str("# name = \"InstallDir\"\n");
+    out.push_str("# value = \"\"\n");
+    out.push_str("#\n");
+    out.push_str("# File associations (extension starts with a dot):\n");
+    out.push_str("# [[file_associations]]\n");
+    out.push_str("# extension = \".myapp\"\n");
+    out.push_str("# prog_id = \"MyApp.Document\"\n");
+    out.push_str("# description = \"My App document\"\n");
+    out.push_str("# open_with = \"MyApp.exe\"\n");
+    out.push_str("#\n");
+    out.push_str("# Prerequisites (checked before install starts; give a registry\n");
+    out.push_str("# probe, a file probe, or both):\n");
+    out.push_str("# [[prerequisites]]\n");
+    out.push_str("# name = \"Example Runtime\"\n");
+    out.push_str("# registry_probe = \"\"\n");
+    out.push_str("# file_probe = \"\"\n");
+    out.push_str("# message = \"This app needs the Example Runtime.\"\n");
+    out.push_str("#\n");
+    out.push_str("# Running-process checks (install waits while these run):\n");
+    out.push_str("# [[process_checks]]\n");
+    out.push_str("# process_name = \"MyApp.exe\"\n");
+    out.push_str("# message = \"Please close My App before installing.\"\n");
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Project loading
+
+/// Read, parse, and check a project file. A missing file is an I/O
+/// error (exit 4); a malformed file or a failed check is a validation
+/// failure (exit 3) listing every problem.
+fn load_project_file(path: &str, command: &str) -> Result<ProjectConfig, Fail> {
+    let text = fs::read_to_string(path)
+        .map_err(|e| Fail::io(command, format!("could not read {path}: {e}")))?;
+    let cfg = ProjectConfig::from_toml(&text).map_err(|m| Fail::validation(command, vec![m]))?;
+    let errors = cfg.validate();
+    if !errors.is_empty() {
+        return Err(Fail::validation(command, errors));
+    }
+    Ok(cfg)
+}
+
+// ---------------------------------------------------------------------------
+// Commands
+
+fn dispatch(args: &[String]) -> Result<CmdOk, Fail> {
+    if args.is_empty() {
+        return Ok(CmdOk {
+            human: HELP.to_string(),
+            json: None,
+        });
+    }
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        return Ok(CmdOk {
+            human: HELP.to_string(),
+            json: None,
+        });
+    }
+    match args[0].as_str() {
+        "help" => Ok(CmdOk {
+            human: HELP.to_string(),
+            json: None,
+        }),
+        "version" | "--version" | "-V" => Ok(CmdOk {
+            human: format!("rustpacker-cli {}\n", env!("CARGO_PKG_VERSION")),
+            json: None,
+        }),
+        "init" => cmd_init(&args[1..]),
+        "validate" => cmd_validate(&args[1..]),
+        "pack" => cmd_pack(&args[1..]),
+        "verify" => cmd_verify(&args[1..]),
+        "list" => cmd_list(&args[1..]),
+        "extract" => cmd_extract(&args[1..]),
+        "schema" => cmd_schema(&args[1..]),
+        other => Err(Fail::usage(
+            None,
+            &format!("unknown command '{other}'; run `rustpacker-cli help` for usage"),
+        )),
+    }
+}
+
+fn cmd_init(args: &[String]) -> Result<CmdOk, Fail> {
+    let (positional, values, flags) =
+        parse_args(args, &["out"], &["force"]).map_err(|m| Fail::usage(Some("init"), &m))?;
+    if !positional.is_empty() {
+        return Err(Fail::usage(
+            Some("init"),
+            "init takes no positional arguments",
+        ));
+    }
+    let out = match opt_value(&values, "out") {
+        Some(v) => v,
+        None => "rustpacker.toml".to_string(),
+    };
+    let out_path = PathBuf::from(&out);
+    if out_path.exists() && !has_flag(&flags, "force") {
+        return Err(Fail::io(
+            "init",
+            format!("{out} already exists (use --force to overwrite it)"),
+        ));
+    }
+    let text = example_toml().map_err(|m| Fail::io("init", m))?;
+    match out_path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => {
+            fs::create_dir_all(parent).map_err(|e| {
+                Fail::io(
+                    "init",
+                    format!("could not create {}: {e}", parent.display()),
+                )
+            })?;
+        }
+        _ => {}
+    }
+    fs::write(&out_path, &text)
+        .map_err(|e| Fail::io("init", format!("could not write {out}: {e}")))?;
+    let human = format!("Wrote {out}\nEdit it, then run: rustpacker-cli validate {out}\n");
+    let json = format!(
+        "{{\"ok\":true,\"command\":\"init\",\"path\":{},\"errors\":[]}}",
+        json_str(&out)
+    );
+    Ok(CmdOk {
+        human,
+        json: Some(json),
+    })
+}
+
+fn cmd_validate(args: &[String]) -> Result<CmdOk, Fail> {
+    let (positional, _values, _flags) =
+        parse_args(args, &[], &[]).map_err(|m| Fail::usage(Some("validate"), &m))?;
+    if positional.len() != 1 {
+        return Err(Fail::usage(
+            Some("validate"),
+            "usage: rustpacker-cli validate <project.toml>",
+        ));
+    }
+    let path = &positional[0];
+    let cfg = load_project_file(path, "validate")?;
+    let human = format!("Valid: {path} - {} v{}\n", cfg.app.name, cfg.app.version);
+    let json = format!(
+        "{{\"ok\":true,\"command\":\"validate\",\"path\":{},\"app\":{},\"version\":{},\"errors\":[]}}",
+        json_str(path),
+        json_str(&cfg.app.name),
+        json_str(&cfg.app.version)
+    );
+    Ok(CmdOk {
+        human,
+        json: Some(json),
+    })
+}
+
+fn cmd_pack(args: &[String]) -> Result<CmdOk, Fail> {
+    let (positional, values, flags) = parse_args(args, &["stub", "out-dir"], &["portable"])
+        .map_err(|m| Fail::usage(Some("pack"), &m))?;
+    if positional.len() != 1 {
+        return Err(Fail::usage(
+            Some("pack"),
+            "usage: rustpacker-cli pack <project.toml> --stub <stub.exe> [--out-dir <dir>] [--portable]",
+        ));
+    }
+    let project_arg = &positional[0];
+    let stub_arg = match opt_value(&values, "stub") {
+        Some(v) => v,
+        None => return Err(Fail::usage(Some("pack"), "--stub <stub.exe> is required")),
+    };
+    let out_dir_arg = match opt_value(&values, "out-dir") {
+        Some(v) => v,
+        None => ".".to_string(),
+    };
+    let want_portable = has_flag(&flags, "portable");
+
+    let cfg = load_project_file(project_arg, "pack")?;
+    let project_dir = project_dir_of(project_arg);
+
+    let stub_path = resolve_relative(&project_dir, &stub_arg);
+    if !stub_path.is_file() {
+        return Err(Fail::io(
+            "pack",
+            format!("stub not found: {}", stub_path.display()),
+        ));
+    }
+    let stub_bytes = fs::read(&stub_path).map_err(|e| {
+        Fail::io(
+            "pack",
+            format!("could not read {}: {e}", stub_path.display()),
+        )
+    })?;
+
+    let source_dir = resolve_relative(&project_dir, &cfg.install.source_dir);
+    let config_json = cfg
+        .to_json()
+        .map_err(|m| Fail::io("pack", format!("could not serialise project: {m}")))?;
+    let (setup_bytes, entries) =
+        pack_directory(&stub_bytes, &source_dir, &config_json).map_err(|m| Fail::io("pack", m))?;
+
+    let out_dir = PathBuf::from(&out_dir_arg);
+    fs::create_dir_all(&out_dir).map_err(|e| {
+        Fail::io(
+            "pack",
+            format!("could not create {}: {e}", out_dir.display()),
+        )
+    })?;
+
+    let app_stem = safe_file_name(&cfg.app.name);
+    let version_stem = safe_file_name(&cfg.app.version);
+    let setup_name = format!("{app_stem}-v{version_stem}-Setup.exe");
+    let setup_path = join_out(&out_dir, &setup_name);
+    fs::write(&setup_path, &setup_bytes).map_err(|e| {
+        Fail::io(
+            "pack",
+            format!("could not write {}: {e}", setup_path.display()),
+        )
+    })?;
+
+    let mut portable_name: Option<String> = None;
+    let mut portable_path: Option<PathBuf> = None;
+    let mut portable_bytes: Vec<u8> = Vec::new();
+    if want_portable {
+        let files = collect_source_files(&source_dir).map_err(|m| Fail::io("pack", m))?;
+        let marker = portable_marker(&cfg, files.len());
+        let mut refs: Vec<(&str, &[u8])> = Vec::new();
+        for (rel, data) in &files {
+            refs.push((rel.as_str(), data.as_slice()));
+        }
+        refs.push(("rustpacker-portable.txt", marker.as_bytes()));
+        portable_bytes = write_stored_zip(&refs);
+        let name = format!("{app_stem}-v{version_stem}-Portable.zip");
+        let path = join_out(&out_dir, &name);
+        fs::write(&path, &portable_bytes)
+            .map_err(|e| Fail::io("pack", format!("could not write {}: {e}", path.display())))?;
+        portable_name = Some(name);
+        portable_path = Some(path);
+    }
+
+    let sums_name = "SHA256SUMS.txt".to_string();
+    let mut sum_items: Vec<(&str, &[u8])> = vec![(setup_name.as_str(), setup_bytes.as_slice())];
+    match &portable_name {
+        Some(name) => sum_items.push((name.as_str(), portable_bytes.as_slice())),
+        None => {}
+    }
+    let sums_text = sha256sums_txt(&sum_items);
+    let sums_path = join_out(&out_dir, &sums_name);
+    fs::write(&sums_path, sums_text.as_bytes()).map_err(|e| {
+        Fail::io(
+            "pack",
+            format!("could not write {}: {e}", sums_path.display()),
+        )
+    })?;
+
+    let file_count = entries.len();
+    let total_bytes: u64 = entries.iter().map(|e| e.size).sum();
+    let file_list: Vec<String> = entries.iter().map(|e| e.path.clone()).collect();
+    let setup_display = setup_path.display().to_string();
+    let sums_display = sums_path.display().to_string();
+
+    let mut human = format!(
+        "Packed {} v{}\n  Setup: {setup_display} ({file_count} files, {total_bytes} payload bytes)\n",
+        cfg.app.name, cfg.app.version
+    );
+    match &portable_path {
+        Some(p) => human.push_str(&format!("  Portable: {}\n", p.display())),
+        None => {}
+    }
+    human.push_str(&format!("  Checksums: {sums_display}\n"));
+
+    let json = format!(
+        "{{\"ok\":true,\"command\":\"pack\",\"app\":{},\"version\":{},\"setup\":{},\"portable\":{},\"sha256sums\":{},\"setup_sha256\":{},\"portable_sha256\":{},\"files\":{},\"file_count\":{},\"total_bytes\":{},\"errors\":[]}}",
+        json_str(&cfg.app.name),
+        json_str(&cfg.app.version),
+        json_str(&setup_display),
+        match &portable_path {
+            Some(p) => json_str(&p.display().to_string()),
+            None => "null".to_string(),
+        },
+        json_str(&sums_display),
+        json_str(&sha256_hex(&setup_bytes)),
+        match &portable_path {
+            Some(_) => json_str(&sha256_hex(&portable_bytes)),
+            None => "null".to_string(),
+        },
+        json_string_array(&file_list),
+        file_count,
+        total_bytes
+    );
+    Ok(CmdOk {
+        human,
+        json: Some(json),
+    })
+}
+
+fn portable_marker(cfg: &ProjectConfig, file_count: usize) -> String {
+    format!(
+        "RustPacker portable export\nApp: {}\nVersion: {}\nPublisher: {}\nFiles: {}\n\nRun {} to start the app.\n",
+        cfg.app.name, cfg.app.version, cfg.app.publisher, file_count, cfg.app.main_exe
+    )
+}
+
+fn cmd_read_setup(args: &[String], command: &str) -> Result<(String, Vec<u8>), Fail> {
+    let (positional, _values, _flags) =
+        parse_args(args, &[], &[]).map_err(|m| Fail::usage(Some(command), &m))?;
+    if positional.len() != 1 {
+        return Err(Fail::usage(
+            Some(command),
+            &format!("usage: rustpacker-cli {command} <Setup.exe>"),
+        ));
+    }
+    let path = positional[0].clone();
+    let bytes =
+        fs::read(&path).map_err(|e| Fail::io(command, format!("could not read {path}: {e}")))?;
+    Ok((path, bytes))
+}
+
+fn cmd_verify(args: &[String]) -> Result<CmdOk, Fail> {
+    let (path, bytes) = cmd_read_setup(args, "verify")?;
+    let manifest = read_manifest(&bytes).map_err(|m| Fail::io("verify", m))?;
+    Ok(setup_report("verify", &path, &bytes, &manifest))
+}
+
+fn cmd_list(args: &[String]) -> Result<CmdOk, Fail> {
+    let (path, bytes) = cmd_read_setup(args, "list")?;
+    let manifest = read_manifest(&bytes).map_err(|m| Fail::io("list", m))?;
+    Ok(setup_report("list", &path, &bytes, &manifest))
+}
+
+fn setup_report(command: &str, path: &str, bytes: &[u8], manifest: &PayloadManifest) -> CmdOk {
+    let payload_sha = match find_payload(bytes) {
+        Ok(info) => info.payload_sha256_hex,
+        Err(_) => String::new(),
+    };
+    let (app, version) = match &manifest.config_json {
+        Some(text) => match ProjectConfig::from_json(text) {
+            Ok(cfg) => (Some(cfg.app.name), Some(cfg.app.version)),
+            Err(_) => (None, None),
+        },
+        None => (None, None),
+    };
+    let total_bytes: u64 = manifest.files.iter().map(|f| f.size).sum();
+    let file_count = manifest.files.len();
+
+    let mut human = String::new();
+    if command == "verify" {
+        human.push_str(&format!("Verified: {path}\n"));
+        match (&app, &version) {
+            (Some(a), Some(v)) => human.push_str(&format!("App: {a} v{v}\n")),
+            _ => {}
+        }
+        if !payload_sha.is_empty() {
+            human.push_str(&format!("Payload SHA-256: {payload_sha}\n"));
+        }
+        human.push_str(&format!("{file_count} files, {total_bytes} bytes:\n"));
+    } else {
+        human.push_str(&format!(
+            "{path}: {file_count} files, {total_bytes} bytes\n"
+        ));
+    }
+    for f in &manifest.files {
+        human.push_str(&format!("  {:>10}  {}  {}\n", f.size, f.path, f.sha256_hex));
+    }
+
+    let mut files_json = String::from("[");
+    for (i, f) in manifest.files.iter().enumerate() {
+        if i > 0 {
+            files_json.push(',');
+        }
+        files_json.push_str(&format!(
+            "{{\"path\":{},\"size\":{},\"sha256\":{}}}",
+            json_str(&f.path),
+            f.size,
+            json_str(&f.sha256_hex)
+        ));
+    }
+    files_json.push(']');
+    let json = format!(
+        "{{\"ok\":true,\"command\":{},\"path\":{},\"app\":{},\"version\":{},\"payload_sha256\":{},\"files\":{},\"file_count\":{},\"total_bytes\":{},\"errors\":[]}}",
+        json_str(command),
+        json_str(path),
+        match &app {
+            Some(a) => json_str(a),
+            None => "null".to_string(),
+        },
+        match &version {
+            Some(v) => json_str(v),
+            None => "null".to_string(),
+        },
+        json_str(&payload_sha),
+        files_json,
+        file_count,
+        total_bytes
+    );
+    CmdOk {
+        human,
+        json: Some(json),
+    }
+}
+
+fn cmd_extract(args: &[String]) -> Result<CmdOk, Fail> {
+    let (positional, values, _flags) =
+        parse_args(args, &["out"], &[]).map_err(|m| Fail::usage(Some("extract"), &m))?;
+    if positional.len() != 1 {
+        return Err(Fail::usage(
+            Some("extract"),
+            "usage: rustpacker-cli extract <Setup.exe> --out <dir>",
+        ));
+    }
+    let path = positional[0].clone();
+    let out = match opt_value(&values, "out") {
+        Some(v) => v,
+        None => return Err(Fail::usage(Some("extract"), "--out <dir> is required")),
+    };
+    let bytes =
+        fs::read(&path).map_err(|e| Fail::io("extract", format!("could not read {path}: {e}")))?;
+    let out_dir = PathBuf::from(&out);
+    fs::create_dir_all(&out_dir)
+        .map_err(|e| Fail::io("extract", format!("could not create {out}: {e}")))?;
+    let extracted = extract_payload(&bytes, &out_dir).map_err(|m| Fail::io("extract", m))?;
+    let file_count = extracted.len();
+    let mut human = format!("Extracted {file_count} files to {out}:\n");
+    for f in &extracted {
+        human.push_str(&format!("  {f}\n"));
+    }
+    let json = format!(
+        "{{\"ok\":true,\"command\":\"extract\",\"path\":{},\"out\":{},\"files\":{},\"file_count\":{},\"errors\":[]}}",
+        json_str(&path),
+        json_str(&out),
+        json_string_array(&extracted),
+        file_count
+    );
+    Ok(CmdOk {
+        human,
+        json: Some(json),
+    })
+}
+
+fn cmd_schema(args: &[String]) -> Result<CmdOk, Fail> {
+    let (positional, _values, _flags) =
+        parse_args(args, &[], &[]).map_err(|m| Fail::usage(Some("schema"), &m))?;
+    if !positional.is_empty() {
+        return Err(Fail::usage(Some("schema"), "schema takes no arguments"));
+    }
+    let text = example_toml().map_err(|m| Fail::io("schema", m))?;
+    Ok(CmdOk {
+        human: text,
+        json: None,
+    })
+}
