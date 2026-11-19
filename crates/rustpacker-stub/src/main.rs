@@ -11,6 +11,7 @@
 //!   * `--uninstall`           uninstall using the journal beside this exe
 //!   * `--uninstall --silent`  uninstall with no UI at all
 //!   * `--help`                show usage in a message box
+//!
 //! Uninstall mode is also selected automatically when this exe's file
 //! name is `Uninstall.exe`.
 //!
@@ -1522,6 +1523,7 @@ mod imp {
     const WS_TABSTOP_: u32 = 0x0001_0000;
     const WS_BORDER_: u32 = 0x0080_0000;
 
+    #[allow(clippy::too_many_arguments)] // mirrors CreateWindowExW's own signature
     unsafe fn make_child(
         parent: HWND,
         class: &str,
@@ -1620,7 +1622,7 @@ mod imp {
             install_failed,
         ) = snapshot;
 
-        with_state(|s| destroy_page_controls(s));
+        with_state(destroy_page_controls);
         set_text(title, page_title(page));
         set_text(body, "");
         let _ = unsafe { KillTimer(hwnd, TIMER_TYPEWRITER) };
@@ -2232,12 +2234,7 @@ mod imp {
                     taken
                 });
                 if let Some((font, title_font, bg_brush, surface_brush)) = gdi {
-                    for obj in [
-                        font as *mut c_void,
-                        title_font as *mut c_void,
-                        bg_brush as *mut c_void,
-                        surface_brush as *mut c_void,
-                    ] {
+                    for obj in [font, title_font, bg_brush, surface_brush] {
                         if !obj.is_null() {
                             let _ = unsafe { DeleteObject(obj) };
                         }

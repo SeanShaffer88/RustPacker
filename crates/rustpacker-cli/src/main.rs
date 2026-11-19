@@ -1104,7 +1104,6 @@ mod tests {
     #[test]
     fn parse_args_accepts_flags_and_values() {
         let args = vec![
-            "pack".to_string(),
             "p.toml".to_string(),
             "--stub".to_string(),
             "s.exe".to_string(),
@@ -1112,7 +1111,7 @@ mod tests {
         ];
         let (positional, values, flags) =
             parse_args(&args, &["stub"], &["portable"]).expect("parse");
-        assert_eq!(positional, vec!["pack".to_string()]);
+        assert_eq!(positional, vec!["p.toml".to_string()]);
         assert_eq!(opt_value(&values, "stub").as_deref(), Some("s.exe"));
         assert!(has_flag(&flags, "portable"));
     }
