@@ -2517,10 +2517,11 @@ mod imp {
                                 if answer != ID_NO {
                                     let _ = unsafe { DestroyWindow(hwnd) };
                                 } else {
-                                    // Every change the install made is in the
-                                    // journal, so replaying it backwards is
-                                    // enough: no `install_dir` needed.
-                                    if let Some(journal) = with_state(|s| s.journal.clone()) {
+                                    // `with_state` itself returns an Option,
+                                    // and so does `s.journal`: flatten first.
+                                    if let Some(journal) =
+                                        with_state(|s| s.journal.clone()).flatten()
+                                    {
                                         let dir = journal.install_dir.clone();
                                         for warning in rollback_journal(&journal, &dir) {
                                             eprintln!("uninstall: {warning}");

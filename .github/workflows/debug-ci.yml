@@ -43,8 +43,9 @@ jobs:
             echo '```'
             ls -l target/x86_64-pc-windows-msvc/release/*.exe 2>&1
             echo '--- the .res cargo handed to the linker ---'
-            for f in target/x86_64-pc-windows-msvc/release/build/*/out/*.res; do
-              echo "$f: $(stat -c%s "$f") bytes"
+            find target -name '*.res' -path '*out*' | while read -r f; do
+              echo "$f ($(stat -c%s "$f") bytes)"
+              od -A d -t x1z -N 96 "$f"
               python tools/inspect_resources.py --res "$f" 2>&1
             done
             echo '```'
