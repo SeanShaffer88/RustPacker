@@ -155,7 +155,9 @@ fn build_res(resources: &[(u32, u32, Vec<u8>)]) -> Vec<u8> {
         out.extend_from_slice(&0u32.to_le_bytes()); // version
         out.extend_from_slice(&0u32.to_le_bytes()); // characteristics
         out.extend_from_slice(data);
-        out.resize(out.len() + (4 - data.len() % 4) % 4, 0);
+        // Pad on the *output* position, not the payload length: the two
+        // agree only because every header is itself 4-byte aligned.
+        out.resize(out.len() + (4 - out.len() % 4) % 4, 0);
     }
     out
 }
