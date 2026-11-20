@@ -1,74 +1,114 @@
 name: Debug CI
 
+# TEMPORARY diagnostic aid while this branch is in review: this sandbox cannot
+# download Actions logs, but it can read PR comments, so each failing check
+# reports itself there. Delete this file before merging to main.
 on:
   push:
     branches: [arena/9c4c73ed-rustpacker]
-  workflow_dispatch:
 
 permissions:
   contents: read
   pull-requests: write
 
 jobs:
-  diag:
+  fmt:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
-      - name: Diagnostics
-        shell: bash
-        run: |
-          set +e
-          {
-            echo '<!-- rustpacker-diag -->'
-            echo '### fmt'
-            echo '```'
-            cargo fmt --all -- --check 2>&1 | head -n 150
-            echo '```'
-            echo '### clippy (linux)'
-            echo '```'
-            cargo clippy --workspace --all-targets -- -D warnings 2>&1 \
-              | grep -vE '^\s+(Compiling|Checking|Finished|Downloading|Downloaded|Updating|Blocking|Locking|Adding)' | head -n 120
-            echo '```'
-            echo '### deny'
-            echo '```'
-            cargo deny check 2>&1 | head -n 120
-            echo '```'
-            echo '### test (linux)'
-            echo '```'
-            cargo test --workspace 2>&1 | grep -E "^test result|^error|^failures:|^---- |panicked" | head -n 80
-            echo '```'
-          } > diag.md
-      - name: Post
+          components: rustfmt
+      - name: Report
         if: always()
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          head -c 60000 diag.md > d.md || true
-          gh pr comment 6 --body-file d.md
-      # Summaries survive log retention and are readable with a plain API
-      # call, which is how this sandbox gets at them.
-      - name: Summarise deny
+          set +e
+          out=$(cargo fmt --all -- --check 2>&1)
+          code=$?
+          {
+            echo "<!-- diag fmt $code -->"
+            echo "### fmt (exit $code)"
+            echo '```'
+            printf '%s\n' "$out" | head -n 120
+            echo '```'
+          } > c.md
+          gh pr comment 6 --body-file c.md
+
+  clippy-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Report
         if: always()
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set +e
+          out=$(cargo clippy --workspace --all-targets -- -D warnings 2>&1)
+          code=$?
           {
-            echo '### deny'
+            echo "<!-- diag clippy-linux $code -->"
+            echo "### clippy linux (exit $code)"
             echo '```'
-            cargo deny check 2>&1 | tail -n 60
+            printf '%s\n' "$out" | grep -vE '^\s+(Compiling|Checking|Downloaded|Downloading|Updating|Locking|Adding|Blocking)' | head -n 150
             echo '```'
-          } >> "$GITHUB_STEP_SUMMARY" || true
-      - name: Summarise clippy (linux, verbose)
+          } > c.md
+          gh pr comment 6 --body-file c.md
+
+  clippy-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Report
         if: always()
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set +e
+          cargo clippy --workspace --all-targets -- -D warnings > out.txt 2>&1
+          code=$?
           {
-            echo '### clippy errors'
+            echo "<!-- diag clippy-win $code -->"
+            echo "### clippy windows (exit $code)"
             echo '```'
-            cargo clippy --workspace --all-targets -- -D warnings 2>&1 \
-              | grep -E '^(error|warning)(\[|:)' -A 6 | head -n 400
+            grep -vE '^\s+(Compiling|Checking|Downloaded|Downloading|Updating|Locking|Adding)' out.txt | head -n 150
             echo '```'
-          } >> "$GITHUB_STEP_SUMMARY" || true
+          } > c.md
+          gh pr comment 6 --body-file c.md
+
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - name: Report
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          cargo deny check > out.txt 2>&1
+          code=$?
+          {
+            echo "<!-- diag deny $code -->"
+            echo "### deny (exit $code)"
+            echo '```'
+            cat out.txt | head -n 100
+            echo '```'
+          } > c.md
+          gh pr comment 6 --body-file c.md
