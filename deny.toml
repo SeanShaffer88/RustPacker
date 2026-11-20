@@ -1,0 +1,47 @@
+# cargo-deny configuration. Enforced in CI with `cargo deny check`.
+#
+# The point is not to be austere — it is to make a new dependency, a licence
+# change, or a yanked crate show up as a failed check instead of a surprise
+# in a release.
+
+[graph]
+# RustPacker targets Windows 11 x64, but core/CLI are platform-independent
+# and CI runs on Linux, so both targets must resolve.
+targets = [
+    { triple = "x86_64-pc-windows-msvc" },
+    { triple = "x86_64-unknown-linux-gnu" },
+]
+
+[advisories]
+version = 2
+yanked = "deny"
+# Fail on any vulnerability with a known severity; ignore only with a
+# dated comment explaining why.
+ignore = []
+
+[licenses]
+version = 2
+# RustPacker is MIT. Everything in the tree today is MIT or
+# MIT/Apache-2.0 dual, which are compatible.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# The build should stay free of a second hashing or JSON stack.
+deny = [
+    { name = "openssl" },
+    { name = "native-tls" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

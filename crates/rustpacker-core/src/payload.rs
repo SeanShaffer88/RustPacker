@@ -24,7 +24,6 @@
 
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
-use std::fmt::Write as _;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -70,13 +69,7 @@ pub struct PackedInfo {
 }
 
 pub fn sha256_hex(data: &[u8]) -> String {
-    let digest = Sha256::digest(data);
-    let mut out = String::with_capacity(64);
-    for b in digest {
-        // `write!` to a String cannot fail; ignore the Result.
-        let _ = write!(out, "{b:02x}");
-    }
-    out
+    hex_of(&Sha256::digest(data))
 }
 
 /// True for Windows reserved device names (`CON`, `PRN`, `AUX`, `NUL`,
@@ -532,6 +525,24 @@ fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
 }
 
 /// Locate and verify the payload footer of a packed exe.
+/// Strip the RustPacker payload from a packed installer, leaving the stub.
+///
+/// AUDIT L16: the uninstaller used to be a byte-for-byte copy of `Setup.exe`,
+/// so every install kept a second copy of the whole payload on disk purely to
+/// delete the first one. The payload is a pure overlay — starting at
+/// `payload_offset` and running to the end of the file — so the uninstaller
+/// only needs everything *before* it. The result is the original stub, which
+/// knows how to uninstall from the journal and simply has nothing to install.
+///
+/// Returns `None` when `exe` carries no payload, which is exactly the case
+/// when the process *is* already an uninstaller: the caller should copy
+/// itself unchanged.
+pub fn strip_payload(exe: &[u8]) -> Option<Vec<u8>> {
+    let info = find_payload(exe).ok()?;
+    let end = usize::try_from(info.payload_offset).ok()?;
+    Some(exe[..end].to_vec())
+}
+
 pub fn find_payload(exe: &[u8]) -> Result<PackedInfo, String> {
     if exe.len() < FOOTER_LEN {
         return Err("file is too small to carry a RustPacker payload".into());
@@ -565,7 +576,10 @@ pub fn find_payload(exe: &[u8]) -> Result<PackedInfo, String> {
         payload_offset,
         payload_len,
         archive_len,
-        payload_sha256_hex: sha256_hex(payload),
+        // The footer already holds the digest and we just proved the payload
+        // matches it, so format those bytes instead of hashing the whole
+        // payload a second time (that was a full extra pass over the file).
+        payload_sha256_hex: hex_of(&footer[32..64]),
     })
 }
 
@@ -892,12 +906,20 @@ pub fn extract_payload_with_progress(
 }
 
 /// Lowercase hex of a raw digest.
+///
+/// One implementation for both callers (`sha256_hex`, and the per-entry
+/// digests in the manifest) so the two can never disagree about case or
+/// padding. Allocates once and indexes a static table instead of running
+/// `format!` per byte.
 fn hex_of(digest: &[u8]) -> String {
-    let mut out = String::with_capacity(digest.len() * 2);
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut bytes = Vec::with_capacity(digest.len() * 2);
     for b in digest {
-        let _ = write!(out, "{b:02x}");
+        bytes.push(HEX[(b >> 4) as usize]);
+        bytes.push(HEX[(b & 0x0f) as usize]);
     }
-    out
+    // Every byte pushed is ASCII hex, so this cannot fail.
+    String::from_utf8(bytes).expect("hex is ASCII")
 }
 
 /// Write a `SHA256SUMS.txt` body for (name, bytes) pairs.
@@ -1209,6 +1231,31 @@ mod tests {
     }
 
     #[test]
+    fn strip_payload_leaves_the_stub_untouched() {
+        let stub_bytes = stub();
+        let exe = pack_files(
+            &stub_bytes,
+            vec![("app.exe".into(), b"binary-bytes".to_vec())],
+            "{\"app\":{}}",
+        )
+        .expect("pack");
+        let stripped = strip_payload(&exe).expect("packed file has a payload");
+        assert_eq!(
+            stripped, stub_bytes,
+            "stripping must reproduce the original stub byte for byte"
+        );
+        assert_eq!(
+            stripped.len(),
+            find_payload(&exe).expect("find").payload_offset as usize
+        );
+        // Very much smaller: this is the L16 saving.
+        assert!(stripped.len() < exe.len());
+        // An already-stripped file has no payload, so there is nothing to do.
+        assert!(strip_payload(&stripped).is_none());
+        assert!(strip_payload(b"tiny").is_none());
+    }
+
+    #[test]
     fn pack_find_verify_extract_round_trip() {
         let exe = pack_files(
             &stub(),
@@ -1221,15 +1268,24 @@ mod tests {
         .expect("pack");
         let info = find_payload(&exe).expect("find");
         assert_eq!(info.payload_offset as usize, stub().len());
+        // L1: the reported digest is formatted from the footer bytes rather
+        // than re-hashing the payload, so prove the two agree.
+        assert_eq!(
+            info.payload_sha256_hex,
+            sha256_hex(
+                &exe[info.payload_offset as usize
+                    ..(info.payload_offset + info.payload_len) as usize]
+            )
+        );
+        assert_eq!(info.payload_sha256_hex.len(), 64);
         let manifest = read_manifest(&exe).expect("manifest");
         assert_eq!(manifest.files.len(), 2);
         assert_eq!(manifest.config_json.as_deref(), Some("{\"app\":{}}"));
         assert_eq!(manifest.files[0].path, "app.exe");
         assert_eq!(manifest.files[0].sha256_hex, sha256_hex(b"binary-bytes"));
 
-        let dir =
-            std::env::temp_dir().join(format!("rustpacker-payload-test-{}", std::process::id()));
-        let extracted = extract_payload(&exe, &dir).expect("extract");
+        let dir = crate::scratch::ScratchDir::new("rustpacker-payload-test");
+        let extracted = extract_payload(&exe, dir.path()).expect("extract");
         assert_eq!(extracted.len(), 2);
         assert_eq!(
             std::fs::read(dir.join("app.exe")).expect("read"),
@@ -1243,7 +1299,6 @@ mod tests {
             !dir.join(CONFIG_ENTRY_NAME).exists(),
             "config entry is not written to disk"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1272,7 +1327,7 @@ mod tests {
 
     #[test]
     fn pack_directory_round_trip() {
-        let base = std::env::temp_dir().join(format!("rustpacker-packdir-{}", std::process::id()));
+        let base = crate::scratch::ScratchDir::new("rustpacker-packdir");
         let src = base.join("src");
         std::fs::create_dir_all(src.join("sub")).expect("mkdir");
         std::fs::write(src.join("main.exe"), b"exe").expect("write");
@@ -1285,7 +1340,6 @@ mod tests {
             std::fs::read(out.join("sub/data.bin")).expect("read"),
             b"bin"
         );
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -1406,8 +1460,7 @@ mod tests {
             "{}",
         )
         .expect("pack");
-        let base =
-            std::env::temp_dir().join(format!("rustpacker-symlink-test-{}", std::process::id()));
+        let base = crate::scratch::ScratchDir::new("rustpacker-symlink-test");
         let outside = base.join("outside");
         let dest = base.join("dest");
         std::fs::create_dir_all(&outside).expect("mkdir outside");
@@ -1419,7 +1472,6 @@ mod tests {
             !outside.join("file.txt").exists(),
             "payload must not escape via symlink"
         );
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -1483,9 +1535,7 @@ mod tests {
 
     #[test]
     fn streaming_zip_matches_in_memory_zip() {
-        let base =
-            std::env::temp_dir().join(format!("rustpacker-zipstream-{}", std::process::id()));
-        std::fs::create_dir_all(&base).expect("mkdir");
+        let base = crate::scratch::ScratchDir::new("rustpacker-zipstream");
         let file_a = base.join("a.txt");
         let file_b = base.join("b.bin");
         std::fs::write(&file_a, b"abc").expect("write");
@@ -1501,13 +1551,11 @@ mod tests {
         // Same container, same CRC/lengths: the only thing that may differ is
         // nothing at all, since both writers emit identical fields.
         assert_eq!(in_memory, streamed);
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
     fn streaming_zip_applies_the_same_path_rules() {
-        let base = std::env::temp_dir().join(format!("rustpacker-ziprules-{}", std::process::id()));
-        std::fs::create_dir_all(&base).expect("mkdir");
+        let base = crate::scratch::ScratchDir::new("rustpacker-ziprules");
         let file = base.join("x");
         std::fs::write(&file, b"x").expect("write");
         assert!(
@@ -1522,7 +1570,6 @@ mod tests {
             ("A.TXT".to_string(), ZipSource::Path(&file)),
         ])
         .is_err());
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -1538,15 +1585,14 @@ mod tests {
         for f in &manifest.files {
             assert_eq!(f.size, (STREAM_CHUNK * 2 + 7) as u64);
         }
-        let dir = std::env::temp_dir().join(format!("rustpacker-large-{}", std::process::id()));
-        let extracted = extract_payload(&exe, &dir).expect("extract");
+        let dir = crate::scratch::ScratchDir::new("rustpacker-large");
+        let extracted = extract_payload(&exe, dir.path()).expect("extract");
         assert_eq!(extracted.len(), 5);
         for i in 0..5u8 {
             let data = std::fs::read(dir.join(format!("big{i}.bin"))).expect("read");
             assert_eq!(data.len(), STREAM_CHUNK * 2 + 7);
             assert!(data.iter().all(|&b| b == i), "contents match");
         }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1586,9 +1632,9 @@ mod tests {
 
         // Progress: one call per payload entry, plus the monotonic byte
         // total that a progress bar needs.
-        let dir = std::env::temp_dir().join(format!("rustpacker-prog-{}", std::process::id()));
+        let dir = crate::scratch::ScratchDir::new("rustpacker-prog");
         let mut seen: Vec<(u64, u64)> = Vec::new();
-        extract_payload_with_progress(&exe, &dir, &mut |done, total, _path| {
+        extract_payload_with_progress(&exe, dir.path(), &mut |done, total, _path| {
             assert!(done <= total, "progress must not exceed the total");
             seen.push((done, total));
             Ok(())
@@ -1598,13 +1644,12 @@ mod tests {
         assert!(seen.iter().all(|(_, total)| *total > 0));
         // Bytes advanced between reports.
         assert!(seen.windows(2).all(|w| w[0].0 <= w[1].0));
-        let _ = std::fs::remove_dir_all(&dir);
 
         // Cancelling aborts with the caller's reason and leaves the
         // partial output for the caller to roll back.
-        let dir2 = std::env::temp_dir().join(format!("rustpacker-cancel-{}", std::process::id()));
+        let dir2 = crate::scratch::ScratchDir::new("rustpacker-cancel");
         let mut calls = 0;
-        let err = extract_payload_with_progress(&exe, &dir2, &mut |_, _, _| {
+        let err = extract_payload_with_progress(&exe, dir2.path(), &mut |_, _, _| {
             calls += 1;
             if calls == 2 {
                 Err("Setup was cancelled".to_string())
@@ -1615,7 +1660,6 @@ mod tests {
         .expect_err("cancel must abort");
         assert!(err.contains("cancelled"), "{err}");
         assert_eq!(calls, 2, "no further entries are touched after a cancel");
-        let _ = std::fs::remove_dir_all(&dir2);
     }
 
     #[test]

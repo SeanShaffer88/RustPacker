@@ -9,8 +9,48 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  # Fail rather than silently resolving a different dependency graph than the
+  # committed lockfile.
+  CARGO_NET_LOCKED: "true"
 
 jobs:
+  # Dependency health. Separate from the build jobs because it answers a
+  # different question — "is what we depend on still safe and correctly
+  # licensed?" — and because a RustSec advisory should not be able to fail a
+  # build that legitimately has nothing wrong with it.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      # `tee` keeps the full report so a failure is diagnosable, and the
+      # output is also echoed to the job summary where it survives log
+      # retention.
+      - name: cargo deny (advisories, licences, bans, sources)
+        run: |
+          set -o pipefail
+          cargo deny check 2>&1 | tee deny-report.txt
+      - name: Report deny findings
+        if: failure()
+        run: |
+          {
+            echo '### cargo deny'
+            echo '```'
+            head -c 20000 deny-report.txt 2>/dev/null || echo '(no report)'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # `cargo audit` reads Cargo.lock and cross-checks the RustSec database;
+      # it catches the same advisories as `deny` but reports them in the
+      # format GitHub's dependency graph understands.
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
   # Fast, platform-independent coverage: the core crate, the CLI, and its
   # end-to-end tests all build and run on Linux. Stub/GUI are
   # Windows-gated, so they are only *checked* here (their `cfg(not(windows))`
@@ -22,6 +62,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy (all targets)
@@ -37,6 +80,9 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
           components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-msvc
       - name: Clippy (Windows-only crates included)
         run: cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings
       - name: Test (host target on Windows runner)
@@ -73,3 +119,16 @@ jobs:
         run: |
           target\x86_64-pc-windows-msvc\release\rustpacker-cli.exe init --out %TEMP%\rustpacker-ci\rustpacker.toml --force
           target\x86_64-pc-windows-msvc\release\rustpacker-cli.exe validate %TEMP%\rustpacker-ci\rustpacker.toml
+
+      # The release assets are built here, on every push, so a broken release
+      # is caught before a tag rather than during one.
+      - name: Upload the Windows binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-binaries
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            target/x86_64-pc-windows-msvc/release/rustpacker-cli.exe
+            target/x86_64-pc-windows-msvc/release/rustpacker-gui.exe
+            target/x86_64-pc-windows-msvc/release/rustpacker-stub.exe

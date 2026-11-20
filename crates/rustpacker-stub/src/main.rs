@@ -42,8 +42,8 @@ fn main() {
 mod imp {
     use rustpacker_core::{
         extract_payload_with_progress, find_payload, read_manifest, sha256_hex, InstallJournal,
-        InstallScope, JournalAction, PayloadManifest, Prerequisite, ProjectConfig, Typewriter,
-        JOURNAL_FILE_NAME, UNINSTALLER_FILE_NAME,
+        InstallLog, InstallScope, JournalAction, PayloadManifest, Prerequisite, ProjectConfig,
+        Typewriter, JOURNAL_FILE_NAME, LOG_FILE_NAME, UNINSTALLER_FILE_NAME,
     };
     use std::cell::RefCell;
     use std::collections::HashSet;
@@ -58,7 +58,7 @@ mod imp {
         HBRUSH, HFONT,
     };
     use windows_sys::Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+        CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_INPROC_SERVER,
         COINIT_APARTMENTTHREADED,
     };
     use windows_sys::Win32::System::Registry::{
@@ -76,23 +76,43 @@ mod imp {
         EnableWindow, SetFocus, VK_RETURN, VK_SPACE,
     };
     use windows_sys::Win32::UI::Shell::{
-        SHGetFolderPathW, ShellExecuteW, CSIDL_DESKTOPDIRECTORY, CSIDL_PROGRAMS,
+        FileOpenDialog, SHCreateItemFromParsingName, SHGetFolderPathW, ShellExecuteW,
+        CSIDL_DESKTOPDIRECTORY, CSIDL_PROGRAMS, FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST,
+        FOS_PICKFOLDERS, SIGDN_FILESYSPATH,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-        GetWindowTextW, KillTimer, LoadCursorW, LoadIconW, MessageBoxW, PostMessageW,
-        PostQuitMessage, RegisterClassExW, SendMessageW, SetTimer, SetWindowTextW, ShowWindow,
-        TranslateMessage, BM_GETCHECK, BM_SETCHECK, BN_CLICKED, CS_HREDRAW, CS_VREDRAW,
+        GetWindowTextLengthW, GetWindowTextW, KillTimer, LoadCursorW, LoadIconW, MessageBoxW,
+        PostMessageW, PostQuitMessage, RegisterClassExW, SendMessageW, SetTimer, SetWindowTextW,
+        ShowWindow, TranslateMessage, BM_GETCHECK, BM_SETCHECK, BN_CLICKED, CS_HREDRAW, CS_VREDRAW,
         CW_USEDEFAULT, HMENU, IDC_ARROW, IDYES, MB_DEFBUTTON2, MB_ICONERROR, MB_ICONINFORMATION,
         MB_ICONQUESTION, MB_OK, MB_YESNO, MSG, STN_CLICKED, SW_SHOWNORMAL, WM_COMMAND,
         WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN,
         WM_PARENTNOTIFY, WM_SETFONT, WM_TIMER, WNDCLASSEXW,
     };
 
+    // Font metrics (L5: these were bare numbers in the CreateFontW call).
+    /// Character height for body text, in pixels.
+    const BODY_FONT_HEIGHT: i32 = 16;
+    /// Character height for the page heading.
+    const TITLE_FONT_HEIGHT: i32 = 21;
+    const FONT_WEIGHT_NORMAL: i32 = 400;
+    const FONT_WEIGHT_BOLD: i32 = 700;
+    const DEFAULT_CHARSET: u32 = 1;
+    const OUT_DEFAULT_PRECIS: u32 = 0;
+    const CLIP_DEFAULT_PRECIS: u32 = 0;
+    /// ClearType is what makes the wizard's monospace text look right on LCDs.
+    const CLEARTYPE_QUALITY: u32 = 5;
+    /// `FF_MODERN | FIXED_PITCH | (VARIABLE_PITCH << 4)` — what GDI calls a
+    /// monospace family. Windows resolves it to the requested face.
+    const FIXED_PITCH_FAMILY: u32 = 49;
+
     // Control IDs.
     const ID_TITLE: i32 = 100;
     const ID_BODY: i32 = 101;
     const ID_DIR_EDIT: i32 = 200;
+    /// M11: the Browse button beside the folder field.
+    const ID_DIR_BROWSE: i32 = 201;
     const ID_PROGRESS: i32 = 210;
     const ID_STATUS: i32 = 211;
     const ID_CHK_DESKTOP: i32 = 300;
@@ -140,8 +160,33 @@ mod imp {
         let w = wide(text);
         let _ = unsafe { SetWindowTextW(hwnd, pcw(&w)) };
     }
+    /// Longest path the installer will accept from the folder field.
+    ///
+    /// `MAX_PATH` is 260, but a user can legitimately type a longer path and
+    /// Windows 10+ with `longPathAware` (which our manifest sets) allows up to
+    /// 32,767. 4,096 is a generous ceiling that still bounds the buffer.
+    const MAX_PATH_CHARS: usize = 4096;
+
+    /// Read a control's text in full.
+    ///
+    /// L5: this used to read into a fixed 2,048-element buffer, so a longer
+    /// install path was silently cut short and the user would watch the
+    /// installer write to a truncated directory. It now asks for the length
+    /// first and reads exactly that many characters.
     fn get_text(hwnd: HWND) -> String {
-        let mut buf = vec![0u16; 2048];
+        if hwnd.is_null() {
+            return String::new();
+        }
+        let len = unsafe { GetWindowTextLengthW(hwnd) };
+        if len <= 0 {
+            return String::new();
+        }
+        // Windows will not hand back more than this for a single-line edit.
+        let len = (len as usize).min(MAX_PATH_CHARS);
+        // GetWindowTextW writes at most len characters and appends no NUL
+        // when the buffer is exactly len long, which is why the buffer is
+        // sized len + 1.
+        let mut buf = vec![0u16; len + 1];
         let n = unsafe { GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32) };
         if n <= 0 {
             return String::new();
@@ -263,23 +308,15 @@ mod imp {
         ))
     }
 
+    /// Sanitise a name for use as a component on disk (folder or `.lnk`).
+    ///
+    /// M13: this used to be a third, subtly different implementation (`_`
+    /// instead of `-`, no reserved-device handling, no length bound), so the
+    /// same app name produced different folder and shortcut spellings. It now
+    /// delegates to the same core function the CLI and GUI use, so every
+    /// surface agrees.
     fn sanitize_folder(name: &str) -> String {
-        let cleaned: String = name
-            .chars()
-            .map(|c| {
-                if "<>:\"/\\|?*".contains(c) || (c as u32) < 32 {
-                    '_'
-                } else {
-                    c
-                }
-            })
-            .collect();
-        let trimmed = cleaned.trim().trim_end_matches('.').trim();
-        if trimmed.is_empty() {
-            "App".to_string()
-        } else {
-            trimmed.to_string()
-        }
+        rustpacker_core::schema::safe_file_name(name)
     }
 
     /// Default install dir: per-user `%LOCALAPPDATA%\Programs\<App>`,
@@ -816,6 +853,70 @@ mod imp {
         save_completed: *const c_void,
         get_cur_file: *const c_void,
     }
+    const IID_IFILE_OPEN_DIALOG: GUID = GUID::from_u128(0xd57c7288_d4ad_4768_be02_9d969532d960);
+    const IID_ISHELL_ITEM: GUID = GUID::from_u128(0x43826d1e_e718_42ee_bc55_a1e261c37bfe);
+
+    /// `IFileDialog`'s vtable, in declaration order.
+    ///
+    /// `IFileOpenDialog` derives from `IFileDialog`, which derives from
+    /// `IModalWindow` (`Show`), which derives from `IUnknown`. The slot order
+    /// below is the `shobjidl_core.h` order exactly, because a single
+    /// misplaced entry would call the wrong function with the wrong arguments.
+    ///
+    /// `IModalWindow`: `show`.
+    ///
+    /// `IFileDialog`: `set_file_types`, `set_file_type_index`,
+    /// `get_file_type_index`, `advise`, `unadvise`, `set_options`,
+    /// `get_options`, `set_default_folder`, `set_folder`, `get_folder`,
+    /// `get_current_selection`, `set_file_name`, `get_file_name`, `set_title`,
+    /// `set_ok_button_label`, `set_file_name_label`, `get_result`, `add_place`,
+    /// `set_default_extension`, `close`, `set_client_guid`,
+    /// `clear_client_data`, `set_filter`. There is deliberately no
+    /// `get_file_types`: `IFileDialog` has no such method.
+    ///
+    /// Only the five entries the picker calls are typed; the rest are opaque
+    /// placeholder slots.
+    #[repr(C)]
+    struct IFileOpenDialogVtbl {
+        base: IUnknownVtbl,
+        show: unsafe extern "system" fn(*mut c_void, HWND) -> HRESULT,
+        set_file_types: *const c_void,
+        set_file_type_index: *const c_void,
+        get_file_type_index: *const c_void,
+        advise: *const c_void,
+        unadvise: *const c_void,
+        set_options: unsafe extern "system" fn(*mut c_void, u32) -> HRESULT,
+        get_options: *const c_void,
+        set_default_folder: *const c_void,
+        set_folder: unsafe extern "system" fn(*mut c_void, *mut c_void) -> HRESULT,
+        get_folder: *const c_void,
+        get_current_selection: *const c_void,
+        set_file_name: *const c_void,
+        get_file_name: *const c_void,
+        set_title: unsafe extern "system" fn(*mut c_void, PCWSTR) -> HRESULT,
+        set_ok_button_label: *const c_void,
+        set_file_name_label: *const c_void,
+        get_result: unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT,
+        add_place: *const c_void,
+        set_default_extension: *const c_void,
+        close: *const c_void,
+        set_client_guid: *const c_void,
+        clear_client_data: *const c_void,
+        set_filter: *const c_void,
+    }
+
+    // IShellItem: IUnknown + BindToHandler, GetParent, GetDisplayName,
+    // GetAttributes, Compare.
+    #[repr(C)]
+    struct IShellItemVtbl {
+        base: IUnknownVtbl,
+        bind_to_handler: *const c_void,
+        get_parent: *const c_void,
+        get_display_name: unsafe extern "system" fn(*mut c_void, u32, *mut *mut u16) -> HRESULT,
+        get_attributes: *const c_void,
+        compare: *const c_void,
+    }
+
     fn com_vtbl<T>(obj: *mut c_void) -> *const T {
         unsafe { *(obj as *const *const T) }
     }
@@ -973,6 +1074,118 @@ mod imp {
             com_release(obj);
             outcome
         }
+    }
+
+    /// Ask the user for a folder with the modern shell picker.
+    ///
+    /// M11: the folder page previously offered a text box and nothing else, so
+    /// finding a directory meant typing a path from memory. `IFileOpenDialog`
+    /// with `FOS_PICKFOLDERS` is the control Explorer itself uses; it is
+    /// available on every supported Windows version (Vista+). Returns `None`
+    /// when the user cancels, and `Err` only when the dialog could not be
+    /// shown at all, so an unexpected failure is reported rather than
+    /// pretending the user cancelled.
+    fn pick_folder(owner: HWND, title: &str, initial: &str) -> Result<Option<String>, String> {
+        unsafe {
+            let hr_init = CoInitializeEx(std::ptr::null_mut(), COINIT_APARTMENTTHREADED as u32);
+            let we_initialised = hr_init >= 0;
+            let outcome = pick_folder_inner(owner, title, initial);
+            if we_initialised {
+                CoUninitialize();
+            }
+            outcome
+        }
+    }
+
+    unsafe fn pick_folder_inner(
+        owner: HWND,
+        title: &str,
+        initial: &str,
+    ) -> Result<Option<String>, String> {
+        let mut dialog: *mut c_void = std::ptr::null_mut();
+        let hr = CoCreateInstance(
+            &FileOpenDialog,
+            std::ptr::null_mut(),
+            CLSCTX_INPROC_SERVER,
+            &IID_IFILE_OPEN_DIALOG,
+            &mut dialog,
+        );
+        if hr < 0 || dialog.is_null() {
+            return Err(format!(
+                "the folder picker could not be created (0x{:08x})",
+                hr as u32
+            ));
+        }
+
+        let outcome = (|| -> Result<Option<String>, String> {
+            let vtbl = com_vtbl::<IFileOpenDialogVtbl>(dialog);
+            let options = FOS_PICKFOLDERS | FOS_PATHMUSTEXIST | FOS_FORCEFILESYSTEM;
+            let hr = ((*vtbl).set_options)(dialog, options);
+            if hr < 0 {
+                return Err(format!(
+                    "the folder picker could not be configured (0x{:08x})",
+                    hr as u32
+                ));
+            }
+            let wtitle = wide(title);
+            let _ = ((*vtbl).set_title)(dialog, pcw(&wtitle));
+
+            // Start where the app is being installed, if that folder exists:
+            // SHCreateItemFromParsingName fails for a path that is not there,
+            // which is exactly the case where starting elsewhere is right.
+            if !initial.trim().is_empty() {
+                let winitial = wide(initial);
+                let mut item: *mut c_void = std::ptr::null_mut();
+                let hr = SHCreateItemFromParsingName(
+                    pcw(&winitial),
+                    std::ptr::null_mut(),
+                    &IID_ISHELL_ITEM,
+                    &mut item,
+                );
+                if hr >= 0 && !item.is_null() {
+                    let _ = ((*vtbl).set_folder)(dialog, item);
+                    com_release(item);
+                }
+            }
+
+            let hr = ((*vtbl).show)(dialog, owner);
+            // The user pressing Cancel is a normal outcome, not an error:
+            // HRESULT_FROM_WIN32(ERROR_CANCELLED) == 0x8007_04C7.
+            if (hr as u32) == 0x8007_04C7 {
+                return Ok(None);
+            }
+            if hr < 0 {
+                return Err(format!("the folder picker failed (0x{:08x})", hr as u32));
+            }
+
+            let mut item: *mut c_void = std::ptr::null_mut();
+            let hr = ((*vtbl).get_result)(dialog, &mut item);
+            if hr < 0 || item.is_null() {
+                return Err(format!(
+                    "the folder picker returned no folder (0x{:08x})",
+                    hr as u32
+                ));
+            }
+            let ivtbl = com_vtbl::<IShellItemVtbl>(item);
+            let mut name: *mut u16 = std::ptr::null_mut();
+            let hr = ((*ivtbl).get_display_name)(item, SIGDN_FILESYSPATH as u32, &mut name);
+            if hr < 0 || name.is_null() {
+                com_release(item);
+                return Err(format!(
+                    "the chosen folder could not be read (0x{:08x})",
+                    hr as u32
+                ));
+            }
+            // The shell allocates this string with CoTaskMemAlloc.
+            let len = (0..).take_while(|&i| *name.add(i) != 0).count();
+            let text = String::from_utf16_lossy(std::slice::from_raw_parts(name, len));
+            CoTaskMemFree(name as *const c_void);
+            com_release(item);
+            Ok(Some(text))
+        })();
+
+        com_release(dialog);
+        outcome
     }
 
     // ------------------------------------------------------------------
@@ -1184,7 +1397,7 @@ mod imp {
         report(65, "Installing the uninstaller...");
         check_canceled()?;
         let uninstaller = dest.join(UNINSTALLER_FILE_NAME);
-        std::fs::copy(&own_exe, &uninstaller)
+        write_uninstaller(&own_exe, &uninstaller)
             .map_err(|e| format!("could not install the uninstaller: {e}"))?;
         journal.record_file(&uninstaller.to_string_lossy());
 
@@ -1308,6 +1521,11 @@ mod imp {
         report(92, "Saving the install journal...");
         check_canceled()?;
         journal.record_file(&dest.join(JOURNAL_FILE_NAME).to_string_lossy());
+        // The log belongs to the install, so uninstalling removes it too. It
+        // has to be recorded even though the worker is still writing to it:
+        // rollback runs on failure and the uninstaller runs much later, and
+        // both happen after the handle is dropped.
+        journal.record_file(&dest.join(LOG_FILE_NAME).to_string_lossy());
         let journal_path = dest.join(JOURNAL_FILE_NAME);
         if let Err(e) = journal.save(&journal_path) {
             // Without a journal there is no reliable uninstaller, so the
@@ -1516,6 +1734,8 @@ mod imp {
         page_index: usize,
         typewriter: Typewriter,
         body_full: String,
+        /// Reused by the typewriter timer so the 12 ms tick does not allocate.
+        reveal_scratch: String,
         // Window + persistent controls.
         hwnd: HWND,
         title_hwnd: HWND,
@@ -1525,6 +1745,7 @@ mod imp {
         cancel_hwnd: HWND,
         // Page controls (null when not on that page).
         dir_edit: HWND,
+        dir_browse: HWND,
         progress: HWND,
         status: HWND,
         chk_desktop: HWND,
@@ -1544,6 +1765,8 @@ mod imp {
         journal: Option<InstallJournal>,
         install_done: bool,
         install_error: Option<String>,
+        /// `--silent`: skip the confirmations a human would read.
+        silent: bool,
         /// True while the worker thread is installing: disables Back/Cancel
         /// semantics that would fight the running install.
         installing: bool,
@@ -1673,6 +1896,12 @@ mod imp {
     const WS_VISIBLE_: u32 = 0x1000_0000;
     const WS_TABSTOP_: u32 = 0x0001_0000;
     const WS_BORDER_: u32 = 0x0080_0000;
+    /// `ES_AUTOHSCROLL` — a long install path scrolls instead of being clipped.
+    const ES_AUTOHSCROLL: u32 = 0x0080;
+    /// `BS_PUSHBUTTON` — the default button behaviour for a plain button.
+    const BS_PUSHBUTTON_: u32 = 0x0000_0000;
+    /// Width of the Browse button beside the folder field, in pixels.
+    const BROWSE_WIDTH: i32 = 88;
 
     #[allow(clippy::too_many_arguments)] // mirrors CreateWindowExW's own signature
     unsafe fn make_child(
@@ -1712,6 +1941,7 @@ mod imp {
     fn destroy_page_controls(state: &mut WizardState) {
         for slot in [
             &mut state.dir_edit,
+            &mut state.dir_browse,
             &mut state.progress,
             &mut state.status,
             &mut state.chk_desktop,
@@ -1810,21 +2040,41 @@ mod imp {
 
         match page {
             Page::Directory => {
+                // The field keeps the left column; Browse sits to its right in
+                // the same row so the two read as one control.
+                let field_width = 512 - BROWSE_WIDTH - 8;
                 let edit = unsafe {
                     make_child(
                         hwnd,
                         "EDIT",
                         &install_dir,
-                        WS_CHILD_ | WS_VISIBLE_ | WS_TABSTOP_ | WS_BORDER_ | 0x0080, // ES_AUTOHSCROLL
+                        WS_CHILD_ | WS_VISIBLE_ | WS_TABSTOP_ | WS_BORDER_ | ES_AUTOHSCROLL,
                         24,
                         196,
-                        512,
+                        field_width,
                         26,
                         ID_DIR_EDIT,
                         font,
                     )
                 };
-                with_state(|s| s.dir_edit = edit);
+                let browse = unsafe {
+                    make_child(
+                        hwnd,
+                        "BUTTON",
+                        "Browse...",
+                        WS_CHILD_ | WS_VISIBLE_ | WS_TABSTOP_ | BS_PUSHBUTTON_,
+                        24 + field_width + 8,
+                        195,
+                        BROWSE_WIDTH,
+                        28,
+                        ID_DIR_BROWSE,
+                        font,
+                    )
+                };
+                with_state(|s| {
+                    s.dir_edit = edit;
+                    s.dir_browse = browse;
+                });
             }
             Page::Installing => {
                 let progress = unsafe {
@@ -1899,6 +2149,7 @@ mod imp {
             install_dir: install_dir.to_string(),
             payload: payload.cloned(),
             hwnd: WindowHandle(hwnd),
+            log_path: install_log_path(install_dir),
         };
         // If the thread cannot be spawned we run inline: a frozen window is
         // still better than an installer that silently does nothing.
@@ -1908,10 +2159,20 @@ mod imp {
             .is_err()
         {
             let payload_ref = payload.map(|p| &**p);
+            let mut log = InstallLog::open(&install_log_path(install_dir))
+                .unwrap_or_else(|_| InstallLog::disabled());
             let done = perform_install(cfg, install_dir, payload_ref, |percent, text| {
+                log.note(text);
                 let _ = unsafe { SendMessageW(progress, PBM_SETPOS, percent as WPARAM, 0) };
                 set_text(status, text);
             });
+            match &done {
+                Ok(_) => log.finish("installed"),
+                Err(e) => {
+                    log.error(e);
+                    log.finish("failed");
+                }
+            }
             finish_on_ui_thread(cfg, done);
         }
     }
@@ -1945,6 +2206,8 @@ mod imp {
         install_dir: String,
         payload: Option<SharedPayload>,
         hwnd: WindowHandle,
+        /// M7: where to write the step-by-step install log.
+        log_path: PathBuf,
     }
 
     /// Show the progress bar at `percent` (0–100) with `text` beside it.
@@ -1962,10 +2225,23 @@ mod imp {
             install_dir,
             payload,
             hwnd,
+            log_path,
         } = job;
+
+        // M7: one line per reported step, plus the failure reason. The log
+        // is opened on the worker so the UI thread never blocks on I/O.
+        let mut log = InstallLog::open(&log_path).unwrap_or_else(|e| {
+            eprintln!("install log unavailable: {e}");
+            InstallLog::disabled()
+        });
+        log.note(&format!(
+            "installing {} {} into {install_dir}",
+            cfg.app.name, cfg.app.version
+        ));
 
         let payload_ref = payload.as_deref();
         let outcome = perform_install(&cfg, &install_dir, payload_ref, |percent, text| {
+            log.note(&format!("{percent}% {text}"));
             // Never touch a window from here: publish the text, then let the
             // UI thread draw it. `perform_install` reports coarse steps, so
             // the bar jumps between the percentages it chooses.
@@ -1974,6 +2250,16 @@ mod imp {
             }
             hwnd.post(WM_INSTALL_PROGRESS, percent as WPARAM, 0);
         });
+        match &outcome {
+            Ok(done) => {
+                log.note(&format!("journal: {}", done.journal.install_dir));
+                log.finish("installed");
+            }
+            Err(e) => {
+                log.error(e);
+                log.finish("failed");
+            }
+        }
 
         // Park the result where the UI thread can retrieve it: an
         // `InstallOutcome` carries owned strings, so it cannot ride through
@@ -2143,8 +2429,10 @@ mod imp {
             Page::Directory => {
                 let edit = with_state(|s| s.dir_edit).unwrap_or(std::ptr::null_mut());
                 let chosen = get_text(edit).trim().to_string();
-                if chosen.is_empty() {
-                    message_box("Please choose an install folder first.", "Setup", true);
+                // M11: one shared rule, so the installer and `rustpacker
+                // validate` cannot disagree about what a usable folder is.
+                if let Err(reason) = rustpacker_core::schema::validate_install_dir(&chosen) {
+                    message_box(&reason, "Setup", true);
                     return;
                 }
                 with_state(|s| {
@@ -2162,6 +2450,81 @@ mod imp {
                 }
             }
         }
+    }
+
+    /// Browse button: ask the shell for a folder and put it in the field.
+    ///
+    /// A dialog failure is reported, not swallowed: silently doing nothing
+    /// looks like a dead button.
+    fn on_browse() {
+        let (hwnd, edit, current) =
+            match with_state(|s| (s.hwnd, s.dir_edit, s.install_dir.clone())) {
+                Some(v) => v,
+                None => return,
+            };
+        let typed = get_text(edit).trim().to_string();
+        let start = if typed.is_empty() { current } else { typed };
+        match pick_folder(hwnd, "Select install folder", &start) {
+            Ok(Some(chosen)) => set_text(edit, &chosen),
+            Ok(None) => {}
+            Err(e) => message_box(
+                &format!("Could not open the folder picker.\r\n\r\n{e}"),
+                "Setup",
+                true,
+            ),
+        }
+    }
+
+    /// Write `Uninstall.exe` beside the installed app.
+    ///
+    /// L16: this used to be a straight copy of the whole installer, which
+    /// meant every install kept a second copy of the entire payload on disk
+    /// just so it could delete the first one. The payload is a pure overlay,
+    /// so the uninstaller only needs the stub image in front of it — the same
+    /// binary, minus the archive it would install. Uninstall mode is chosen
+    /// from the file name (`Uninstall*.exe`), not from the payload, so the
+    /// stripped copy uninstalls exactly as the full copy did.
+    ///
+    /// If this executable has no payload (it is already an uninstaller being
+    /// re-run, or a demo build), the copy is byte-for-byte.
+    fn write_uninstaller(own_exe: &Path, dest: &Path) -> std::io::Result<()> {
+        let bytes = std::fs::read(own_exe)?;
+        match rustpacker_core::strip_payload(&bytes) {
+            Some(stub_only) => std::fs::write(dest, stub_only),
+            None => std::fs::write(dest, &bytes),
+        }
+        // `strip_payload` failing and copying the whole file is deliberate:
+        // an uninstaller that is too big is harmless, one that is truncated
+        // would strand the install.
+    }
+
+    /// Where this install writes its log: beside the install journal, so a
+    /// support request only needs one folder. Before the folder exists the
+    /// write fails harmlessly and `InstallLog::disabled` takes over.
+    fn install_log_path(install_dir: &str) -> PathBuf {
+        PathBuf::from(install_dir).join(LOG_FILE_NAME)
+    }
+
+    /// Ask whether to abandon the wizard. Always true under `--silent`.
+    fn confirm_cancel() -> bool {
+        // An unattended run has nobody to answer, and it asked for no UI.
+        if with_state(|s| s.silent).unwrap_or(false) {
+            return true;
+        }
+        let answer = unsafe {
+            MessageBoxW(
+                std::ptr::null_mut(),
+                pcw(&wide(
+                    "Stop the setup and exit?\n\n\
+                     Nothing has been installed yet.",
+                )),
+                pcw(&wide("Cancel Setup")),
+                // Yes/No with No as the default (MB_DEFBUTTON2), so a stray
+                // Enter keeps the wizard open rather than discarding it.
+                MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2,
+            )
+        };
+        answer == IDYES
     }
 
     fn on_back() {
@@ -2422,23 +2785,23 @@ mod imp {
                 0
             }
             WM_TIMER if wparam == TIMER_TYPEWRITER => {
-                let update = with_state(|s| {
+                // The reveal runs on a 12 ms timer, so the text is built into
+                // a reusable buffer and handed to the window while still
+                // borrowed -- no per-tick `String` allocation.
+                let done = with_state(|s| {
                     let interval = s.typewriter.interval_ms();
                     if !s.typewriter.advance(interval) {
                         return None;
                     }
-                    Some((
-                        s.body_hwnd,
-                        s.typewriter.visible_text(),
-                        s.typewriter.is_complete(),
-                    ))
+                    s.typewriter.write_visible(&mut s.reveal_scratch);
+                    // `set_text` copies into the control, so the borrow ends
+                    // here; no clone is needed.
+                    set_text(s.body_hwnd, &s.reveal_scratch);
+                    Some(s.typewriter.is_complete())
                 })
                 .flatten();
-                if let Some((body, visible, complete)) = update {
-                    set_text(body, &visible);
-                    if complete {
-                        let _ = unsafe { KillTimer(hwnd, TIMER_TYPEWRITER) };
-                    }
+                if done == Some(true) {
+                    let _ = unsafe { KillTimer(hwnd, TIMER_TYPEWRITER) };
                 }
                 0
             }
@@ -2484,6 +2847,7 @@ mod imp {
                     match id {
                         ID_NEXT => on_next(),
                         ID_BACK => on_back(),
+                        ID_DIR_BROWSE => on_browse(),
                         ID_CANCEL => {
                             let running = with_state(|s| s.installing).unwrap_or(false);
                             if running {
@@ -2533,7 +2897,13 @@ mod imp {
                                     let _ = unsafe { DestroyWindow(hwnd) };
                                 }
                             } else {
-                                let _ = unsafe { DestroyWindow(hwnd) };
+                                // M7: cancelling throws away the wizard, so
+                                // ask first unless the user asked for an
+                                // unattended run. Nothing has been written at
+                                // this point, so there is nothing to undo.
+                                if confirm_cancel() {
+                                    let _ = unsafe { DestroyWindow(hwnd) };
+                                }
                             }
                         }
                         ID_CHK_LAUNCH => {
@@ -2617,8 +2987,9 @@ mod imp {
             .unwrap_or_default();
         let uninstall_mode =
             exe_stem.eq_ignore_ascii_case("Uninstall") || has("--uninstall") || has("/uninstall");
+        let silent = has("--silent") || has("/silent");
         if uninstall_mode {
-            return run_uninstall(has("--silent") || has("/silent"));
+            return run_uninstall(silent);
         }
         // Per-machine installs need elevation: offer a UAC re-launch
         // instead of failing at the first HKLM write. A per-user install
@@ -2649,10 +3020,10 @@ mod imp {
                 }
             }
         }
-        run_wizard()
+        run_wizard(silent)
     }
 
-    fn run_wizard() -> i32 {
+    fn run_wizard(silent: bool) -> i32 {
         // Per-Monitor DPI V2 before any window exists.
         let _ =
             unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
@@ -2699,8 +3070,38 @@ mod imp {
         let face = wide("Cascadia Mono");
         let (font, title_font, bg_brush, surface_brush) = unsafe {
             (
-                CreateFontW(-16, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 49, pcw(&face)),
-                CreateFontW(-21, 0, 0, 0, 700, 0, 0, 0, 1, 0, 0, 5, 49, pcw(&face)),
+                CreateFontW(
+                    -(BODY_FONT_HEIGHT),
+                    0,
+                    0,
+                    0,
+                    FONT_WEIGHT_NORMAL,
+                    0,
+                    0,
+                    0,
+                    DEFAULT_CHARSET,
+                    OUT_DEFAULT_PRECIS,
+                    CLIP_DEFAULT_PRECIS,
+                    CLEARTYPE_QUALITY,
+                    FIXED_PITCH_FAMILY,
+                    pcw(&face),
+                ),
+                CreateFontW(
+                    -(TITLE_FONT_HEIGHT),
+                    0,
+                    0,
+                    0,
+                    FONT_WEIGHT_BOLD,
+                    0,
+                    0,
+                    0,
+                    DEFAULT_CHARSET,
+                    OUT_DEFAULT_PRECIS,
+                    CLIP_DEFAULT_PRECIS,
+                    CLEARTYPE_QUALITY,
+                    FIXED_PITCH_FAMILY,
+                    pcw(&face),
+                ),
                 CreateSolidBrush(bg_color),
                 CreateSolidBrush(colorref(theme.surface_rgb())),
             )
@@ -2710,6 +3111,8 @@ mod imp {
         let null = std::ptr::null_mut();
         let state = WizardState {
             body_full: String::new(),
+            reveal_scratch: String::new(),
+            silent,
             typewriter: Typewriter::new("", interval),
             pages,
             page_index: 0,
@@ -2720,6 +3123,7 @@ mod imp {
             next_hwnd: null,
             cancel_hwnd: null,
             dir_edit: null,
+            dir_browse: null,
             progress: null,
             status: null,
             chk_desktop: null,

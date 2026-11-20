@@ -20,5 +20,18 @@ authors = ["Sean Shaffer"]
 opt-level = "z"
 lto = true
 codegen-units = 1
+# BUGS.md / AUDIT.md L11: `panic = "abort"` means an unexpected panic exits
+# with code 134 (SIGABRT) and prints nothing useful, because symbols are also
+# stripped. That is the right trade for the stub — it must stay small — so the
+# behaviour is documented rather than changed, and every panic-prone path is
+# an explicit `Result` instead of an `unwrap`. Debug builds keep
+# `panic = "unwind"` and full symbols, so a failure there still produces a
+# readable backtrace.
 panic = "abort"
 strip = true
+
+[profile.dev]
+# Defaults, restated so the contrast with `release` above is visible in this
+# file rather than implied: unwinding panics and unstripped symbols.
+panic = "unwind"
+debug = true

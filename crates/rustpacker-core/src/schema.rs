@@ -148,8 +148,9 @@ pub struct TrayConfig {
     pub supports_tray: bool,
     /// Argument passed when launching minimised to tray (e.g. `--tray`).
     pub tray_arg: String,
-    /// Optional distinct argument for the at-login launch. When empty,
-    /// [`TrayConfig::effective_startup_tray_arg`] falls back to `tray_arg`.
+    /// Optional distinct argument for the at-login launch. When empty or
+    /// only whitespace, [`TrayConfig::effective_startup_tray_arg`] falls
+    /// back to `tray_arg`.
     pub startup_tray_arg: String,
 }
 
@@ -172,6 +173,146 @@ impl TrayConfig {
         } else {
             &self.startup_tray_arg
         }
+    }
+}
+
+/// The finish page's checkbox state, as the preview and the wizard hold it.
+///
+/// AUDIT L6: this lived as five independent `bool`s inside the GUI, and the
+/// GUI re-seeded all of them whenever [`FinishScreenModel`] changed — which
+/// happens as soon as the user toggles tray support or hides the launch row.
+/// That threw away choices the user had just made to *unrelated* options.
+/// Keeping the state and the update rule here makes the rule testable and
+/// stops the two surfaces drifting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FinishSelection {
+    pub desktop: bool,
+    pub launch: bool,
+    pub launch_tray: bool,
+    pub login: bool,
+    pub login_tray: bool,
+    /// Which options have ever been shown. The model alone cannot answer
+    /// "is this new, or is it coming back?" — a row that was hidden and is
+    /// now visible looks identical to one that has just been introduced, and
+    /// the two need opposite treatment. Remembering what the user has
+    /// actually seen is the only way to tell them apart.
+    seen: SeenOptions,
+}
+
+/// A bitset of the finish-page options that have been displayed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct SeenOptions(u8);
+
+impl SeenOptions {
+    const DESKTOP: u8 = 1 << 0;
+    const LAUNCH: u8 = 1 << 1;
+    const LAUNCH_TRAY: u8 = 1 << 2;
+    const LOGIN: u8 = 1 << 3;
+    const LOGIN_TRAY: u8 = 1 << 4;
+
+    fn has(self, bit: u8) -> bool {
+        self.0 & bit != 0
+    }
+
+    fn set(&mut self, bit: u8) {
+        self.0 |= bit;
+    }
+}
+
+impl FinishSelection {
+    /// The state a freshly loaded project starts in: every option at its
+    /// configured default. Nothing has been seen yet, so the first
+    /// [`FinishSelection::reseed`] still seeds everything from the defaults
+    /// the project actually asks for.
+    pub fn from_defaults(cfg: &FinishConfig) -> Self {
+        Self {
+            desktop: cfg.desktop_shortcut_default,
+            launch: cfg.launch_after_setup_default,
+            launch_tray: cfg.launch_tray_default,
+            login: cfg.launch_at_login_default,
+            login_tray: cfg.login_tray_default,
+            seen: SeenOptions::default(),
+        }
+    }
+
+    /// Apply a new model, preserving the user's choices.
+    ///
+    /// * an option the user has already been shown keeps their choice;
+    /// * an option being shown for the first time takes the project's default,
+    ///   because the user has never had the chance to set it;
+    /// * hiding and re-showing a row is therefore lossless — the second
+    ///   appearance is remembered as a *return*, not a first visit;
+    /// * a sub-option whose parent is off keeps its choice while it is
+    ///   disabled; it has no effect until the parent is on, because
+    ///   [`FinishScreenModel::launch_args`] and
+    ///   [`FinishScreenModel::login_command`] both gate on the parent.
+    pub fn reseed(self, model: &FinishScreenModel, cfg: &FinishConfig) -> Self {
+        let mut out = self;
+        let mut seen = self.seen;
+
+        // `seed` applies the one rule an option needs: until it has
+        // actually been shown, it carries the project's default (so
+        // arbitrary initial state cannot leak through); being shown marks
+        // it seen, and after that the user's choice stands, visible or
+        // hidden.
+        fn seed(value: &mut bool, visible: bool, bit: u8, seen: &mut SeenOptions, default: bool) {
+            if !seen.has(bit) {
+                *value = default;
+                if visible {
+                    seen.set(bit);
+                }
+            }
+        }
+
+        seed(
+            &mut out.desktop,
+            model.show_desktop_shortcut,
+            SeenOptions::DESKTOP,
+            &mut seen,
+            cfg.desktop_shortcut_default,
+        );
+        seed(
+            &mut out.launch,
+            model.show_launch_after_setup,
+            SeenOptions::LAUNCH,
+            &mut seen,
+            cfg.launch_after_setup_default,
+        );
+        seed(
+            &mut out.login,
+            model.show_launch_at_login,
+            SeenOptions::LOGIN,
+            &mut seen,
+            cfg.launch_at_login_default,
+        );
+
+        // The tray sub-options come last, because whether they can be used
+        // depends on the parents above.
+        //
+        // A sub-option whose parent is off is disabled in both surfaces,
+        // but its choice is kept: the stub does exactly this (it enables
+        // and disables the checkbox without clearing it), and clearing it
+        // here would lose the project's default — or the user's choice —
+        // before they ever had a usable control to set it with. It cannot
+        // take effect while the parent is off, because `launch_args` and
+        // `login_command` both check the parent first.
+        seed(
+            &mut out.launch_tray,
+            model.show_launch_tray,
+            SeenOptions::LAUNCH_TRAY,
+            &mut seen,
+            cfg.launch_tray_default,
+        );
+        seed(
+            &mut out.login_tray,
+            model.show_login_tray,
+            SeenOptions::LOGIN_TRAY,
+            &mut seen,
+            cfg.login_tray_default,
+        );
+
+        out.seen = seen;
+        out
     }
 }
 
@@ -276,6 +417,13 @@ impl FinishScreenModel {
         }
         if start_in_tray && self.show_login_tray {
             let arg = cfg.tray.effective_startup_tray_arg().trim();
+            // A fragment starting with a quote would close the exe path's
+            // quoting early, so `"C:\a.exe" " b` becomes two broken
+            // arguments. Reject it rather than emit a Run value Windows will
+            // fail to launch.
+            if arg.starts_with('"') {
+                return None;
+            }
             if arg.is_empty() {
                 Some(format!("\"{exe_path}\""))
             } else {
@@ -514,6 +662,12 @@ fn is_reserved_device_name(stem: &str) -> bool {
 /// when nothing usable remains. Reserved device names get a `_`
 /// prefix. This is the single implementation shared by the CLI and
 /// the GUI so both produce identical output file names.
+/// Longest stem `safe_file_name` returns, in characters.
+///
+/// Windows limits a single path component to 255 characters; the buffer is
+/// bounded so a pathological app name cannot produce an uncreatable folder.
+pub const MAX_SAFE_NAME: usize = 120;
+
 pub fn safe_file_name(raw: &str) -> String {
     let mut out = String::new();
     for c in raw.chars() {
@@ -523,16 +677,158 @@ pub fn safe_file_name(raw: &str) -> String {
             out.push(c);
         }
     }
-    let trimmed = out.trim_matches(|c| c == '.' || c == ' ');
+    // Dots and *whitespace* at either end are stripped by Windows, so a
+    // name bounded by either would create a folder with a different name
+    // than the one shown. Trimming both character classes from both ends
+    // covers every Unicode space, not just U+0020, and mixtures such as
+    // `"  My App.  "`.
+    let trimmed = out.trim_matches(|c: char| c == '.' || c.is_whitespace());
     if trimmed.is_empty() {
         return "App".to_string();
     }
-    let stem = trimmed.split('.').next().unwrap_or(trimmed);
+    // Bound the length *after* trimming, counting characters (not bytes) so
+    // a name of multi-byte characters is not cut mid-grapheme by the caller.
+    let trimmed: String = trimmed.chars().take(MAX_SAFE_NAME).collect();
+    let stem = trimmed.split('.').next().unwrap_or(&trimmed);
     if is_reserved_device_name(stem) {
         format!("_{trimmed}")
     } else {
-        trimmed.to_string()
+        trimmed
     }
+}
+
+/// Longest install path the installer accepts, in UTF-16 code units.
+///
+/// A Win32 path is limited to 32,767 characters, but every component except
+/// the root is limited to 255, and an install directory deeper than this is
+/// almost certainly a mistake rather than an intent.
+pub const MAX_INSTALL_PATH: usize = 4096;
+
+/// Windows directories an install must never target.
+///
+/// Installing over the OS directory, a system directory, or a drive root
+/// either fails halfway (leaving a half-installed app) or corrupts Windows.
+/// Comparison is case-insensitive and ignores trailing separators, because
+/// `C:\WINDOWS\System32\` and `c:\windows\system32` are the same place.
+const FORBIDDEN_ROOTS: &[&str] = &[
+    "windows",
+    "windows\\system32",
+    "windows\\syswow64",
+    "windows\\system",
+    "program files\\windowsapps",
+    "users",
+    "users\\public",
+    "$recycle.bin",
+    "system volume information",
+    "recovery",
+    "boot",
+];
+
+/// Reject install directories that cannot or must not be used.
+///
+/// Returns a human-readable reason, suitable for putting straight in a
+/// message box. `Ok` means the path is *plausible*: the caller still has to
+/// create it, because writability can only be tested by trying.
+pub fn validate_install_dir(raw: &str) -> Result<(), String> {
+    let path = raw.trim();
+    if path.is_empty() {
+        return Err("Choose an install folder.".to_string());
+    }
+    if path.len() > MAX_INSTALL_PATH {
+        return Err(format!(
+            "That folder path is {} characters long; the limit is {MAX_INSTALL_PATH}.",
+            path.len()
+        ));
+    }
+    // Invalid characters: everything NTFS forbids in a name, plus the
+    // control range. A folder path may contain '\' and ':' (drive letter),
+    // but not the others.
+    if let Some(bad) = path
+        .chars()
+        .find(|&c| matches!(c, '<' | '>' | '"' | '|' | '?' | '*') || (c as u32) < 0x20)
+    {
+        return Err(format!(
+            "That folder path contains {bad:?}, which Windows does not allow in a path."
+        ));
+    }
+
+    // A relative path would be resolved against the installer's working
+    // directory, which is not something a user can reason about.
+    let bytes = path.as_bytes();
+    let has_drive = bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic();
+    let is_unc = path.starts_with("\\\\");
+    let is_device = path.starts_with("\\\\.\\") || path.starts_with("\\??\\");
+    if is_device {
+        return Err("That is a device path, not a folder.".to_string());
+    }
+    if !has_drive && !is_unc {
+        return Err(format!(
+            "\"{path}\" is not a full path. Start it with a drive letter, e.g. C:\\Programs."
+        ));
+    }
+
+    // A drive with no folder under it. This has to be its own case: splitting
+    // the body would produce zero components, which reads as a drive root
+    // anyway, but saying "choose a folder inside it" is the useful message.
+    if has_drive && path[2..].trim_matches(|c| c == '\\' || c == '/').is_empty() {
+        return Err(format!(
+            "\"{path}\" is a drive root. Choose a folder inside it, e.g. C:\\Programs."
+        ));
+    }
+    // A UNC share with no folder under it (`\\server\share`) is legal to
+    // install into, so it is deliberately not treated as a root.
+
+    // Component checks: empty components double up separators, "." and ".."
+    // are relative, and a reserved device name as a folder name is silently
+    // unusable on Windows.
+    let body = if has_drive { &path[2..] } else { path };
+    // A `[char; N]` pattern would be tidier but needs Rust 1.71; the MSRV is
+    // 1.70, so the closure stays and the lint is answered rather than obeyed.
+    #[allow(clippy::manual_pattern_char_comparison)]
+    let components_iter = body.split(|c| c == '\\' || c == '/');
+    for part in components_iter {
+        if part.is_empty() {
+            continue;
+        }
+        if part == "." || part == ".." {
+            return Err(format!(
+                "\"{path}\" is not a full path: \"{part}\" makes it depend on the current folder."
+            ));
+        }
+        if part.len() > 255 {
+            return Err(format!(
+                "The folder name \"{}\" is longer than Windows allows (255 characters).",
+                part
+            ));
+        }
+        let stem = part.split('.').next().unwrap_or(part);
+        if is_reserved_device_name(stem) {
+            return Err(format!(
+                "\"{part}\" is a reserved Windows device name; Windows cannot create that folder."
+            ));
+        }
+        // Names cannot end in a dot or whitespace: Windows strips them, so the
+        // folder created would not be the folder asked for. (`\t` counts:
+        // NTFS treats it like a space here.)
+        if part.ends_with(char::is_whitespace) || part.ends_with('.') {
+            return Err(format!(
+                "The folder name \"{part}\" ends with a space or a dot; Windows would silently drop it."
+            ));
+        }
+    }
+
+    // Forbidden locations: compare the path below the drive root, with
+    // separators normalised and case folded.
+    let below_root = body.replace('/', "\\");
+    let below_root = below_root.trim_matches('\\').to_ascii_lowercase();
+    for forbidden in FORBIDDEN_ROOTS {
+        if below_root == *forbidden {
+            return Err(format!(
+                "\"{path}\" is a Windows system folder. Choose somewhere else."
+            ));
+        }
+    }
+    Ok(())
 }
 
 impl ProjectConfig {
@@ -792,6 +1088,88 @@ impl ProjectConfig {
 mod tests {
     use super::*;
 
+    // ---- M11: install-directory validation -------------------------------
+
+    #[test]
+    fn ordinary_install_dirs_are_accepted() {
+        for good in [
+            r"C:\Program Files\My App",
+            r"C:\Program Files\My App\",
+            r"c:\program files\my app",
+            r"D:\Apps\Widget",
+            r"\\server\share\Widget",
+            r"C:\Users\sean\AppData\Local\Programs\Widget",
+        ] {
+            assert!(
+                validate_install_dir(good).is_ok(),
+                "{good} should be accepted: {:?}",
+                validate_install_dir(good)
+            );
+        }
+    }
+
+    #[test]
+    fn install_dir_rejects_what_windows_will_not_create() {
+        // (input, a word the message must contain)
+        let cases = [
+            ("", "Choose"),
+            ("   ", "Choose"),
+            (r"Programs\Widget", "full path"),
+            (r"\Widget", "full path"),
+            (r"C:\Programs\..\..\Windows", "current folder"),
+            (r"C:\Programs\.\Widget", "current folder"),
+            (r"C:\Programs\Wi|dget", "does not allow"),
+            (r"C:\Programs\Wi<dget", "does not allow"),
+            (r"C:\Programs\NUL", "reserved"),
+            (r"C:\Programs\con", "reserved"),
+            (r"C:\Programs\NUL.txt", "reserved"),
+            // Note: a *trailing* space on the whole path is removed by the
+            // `trim()` at the top (it is what a paste from Explorer leaves
+            // behind), so the case that reaches the component check is a
+            // space in the middle of the path.
+            (r"C:\Programs\Widget \bin", "space or a dot"),
+            (r"C:\Programs\Widget.", "space or a dot"),
+            (r"C:\", "drive root"),
+            (r"\\.\C:\Widget", "device path"),
+        ];
+        for (input, needle) in cases {
+            match validate_install_dir(input) {
+                Ok(()) => panic!("{input:?} should have been rejected"),
+                Err(msg) => assert!(
+                    msg.to_lowercase().contains(&needle.to_lowercase()),
+                    "{input:?} produced {msg:?}, expected it to mention {needle:?}"
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn install_dir_rejects_windows_system_locations() {
+        for bad in [
+            r"C:\Windows",
+            r"C:\Windows\",
+            r"c:\windows\system32",
+            r"C:\WINDOWS\SysWOW64\",
+            r"C:\Program Files\WindowsApps",
+            r"C:\Users",
+            r"C:\$Recycle.Bin",
+            r"C:\System Volume Information",
+        ] {
+            let err = validate_install_dir(bad).expect_err(bad);
+            assert!(err.contains("system folder"), "{bad} -> {err}");
+        }
+    }
+
+    #[test]
+    fn install_dir_rejects_overlong_paths_and_component_names() {
+        let long_component = format!(r"C:\{}", "a".repeat(256));
+        assert!(validate_install_dir(&long_component)
+            .expect_err("component")
+            .contains("255"));
+        let long_path = format!(r"C:\{}", "a/".repeat(3000));
+        assert!(validate_install_dir(&long_path).is_err());
+    }
+
     #[test]
     fn theme_defaults_are_one_dark_pro() {
         let t = TerminalTheme::default();
@@ -862,6 +1240,242 @@ mod tests {
         assert_eq!(m.launch_args(&cfg, true, true), vec!["--tray".to_string()]);
     }
 
+    // ---- L6: the preview keeps the user's choices -------------------------
+
+    fn finish_cfg(tray: bool) -> ProjectConfig {
+        let mut cfg = ProjectConfig::default();
+        cfg.tray.supports_tray = tray;
+        cfg.tray.tray_arg = "--tray".into();
+        cfg
+    }
+
+    #[test]
+    fn first_reseed_seeds_every_option_from_the_project_defaults() {
+        let mut cfg = finish_cfg(false);
+        cfg.finish.desktop_shortcut_default = false;
+        cfg.finish.launch_after_setup_default = true;
+        let model = cfg.finish_model();
+        // Nonsense everywhere: the first reseed must overwrite all of it.
+        let seed = FinishSelection {
+            desktop: true,
+            launch: false,
+            launch_tray: true,
+            login: true,
+            login_tray: true,
+            ..FinishSelection::default()
+        };
+        let out = seed.reseed(&model, &cfg.finish);
+        assert!(!out.desktop, "desktop takes its configured default");
+        assert!(out.launch, "launch takes its configured default");
+        // The tray options are not on the page at all without tray support,
+        // so they carry their configured defaults (launch tray off, login
+        // tray on) without counting as seen.
+        assert!(!out.launch_tray && out.login_tray);
+    }
+
+    #[test]
+    fn reseed_keeps_choices_when_an_unrelated_option_changes() {
+        let cfg = finish_cfg(true);
+        let model = cfg.finish_model();
+        let mut state = FinishSelection::from_defaults(&cfg.finish).reseed(&model, &cfg.finish);
+        // The user turns the desktop shortcut off and the login launch on.
+        state.desktop = false;
+        state.login = true;
+        // Now they hide the launch row: that has nothing to do with desktop
+        // or login, so both choices must survive.
+        let mut hidden = cfg.clone();
+        hidden.finish.hide_launch_after_setup = true;
+        let out = state.reseed(&hidden.finish_model(), &hidden.finish);
+        assert!(!out.desktop, "desktop choice must survive");
+        assert!(out.login, "login choice must survive");
+    }
+
+    #[test]
+    fn an_option_that_appears_starts_at_its_default() {
+        let mut cfg = finish_cfg(false);
+        cfg.finish.login_tray_default = false;
+        let model = cfg.finish_model();
+        let state = FinishSelection::from_defaults(&cfg.finish).reseed(&model, &cfg.finish);
+        // Tray support is switched on, so the tray options appear for the
+        // first time and take the project's defaults.
+        cfg.tray.supports_tray = true;
+        cfg.finish.login_tray_default = true;
+        let out = state.reseed(&cfg.finish_model(), &cfg.finish);
+        assert!(out.login_tray, "a new option takes its configured default");
+    }
+
+    #[test]
+    fn hiding_then_showing_an_option_is_not_a_reset() {
+        let cfg = finish_cfg(true);
+        let model = cfg.finish_model();
+        let mut state = FinishSelection::from_defaults(&cfg.finish).reseed(&model, &cfg.finish);
+        state.launch = true;
+        state.launch_tray = true;
+        let user = state;
+        // Hide the launch row (which hides its tray sub-option), then bring
+        // it back.
+        let mut hidden = cfg.clone();
+        hidden.finish.hide_launch_after_setup = true;
+        let hidden_model = hidden.finish_model();
+        let during = user.reseed(&hidden_model, &hidden.finish);
+        let after = during.reseed(&model, &cfg.finish);
+        assert!(after.launch_tray, "the tray choice came back");
+        assert_eq!(user, after, "hide/show must be lossless");
+    }
+
+    /// A sub-option whose parent is *off* is disabled, not cleared: both
+    /// surfaces enable and disable the checkbox without unticking it, so
+    /// the choice (here, the project's default) is still there when the
+    /// parent is switched back on.
+    #[test]
+    fn a_sub_option_choice_survives_its_parent_being_toggled() {
+        let mut cfg = finish_cfg(true);
+        cfg.finish.launch_tray_default = true;
+        let model = cfg.finish_model();
+        let mut state = FinishSelection::from_defaults(&cfg.finish).reseed(&model, &cfg.finish);
+        assert!(state.launch_tray, "the default applied while usable");
+        // The user turns the launch row off: the sub-option is disabled,
+        // but its tick must survive.
+        state.launch = false;
+        state = state.reseed(&model, &cfg.finish);
+        assert!(state.launch_tray, "kept while the parent is off");
+        // Turning the parent back on restores exactly that choice.
+        state.launch = true;
+        state = state.reseed(&model, &cfg.finish);
+        assert!(state.launch_tray, "the same choice is usable again");
+    }
+
+    #[test]
+    fn a_sub_option_without_its_parent_has_no_effect() {
+        let cfg = finish_cfg(true);
+        let model = cfg.finish_model();
+        let mut state = FinishSelection::from_defaults(&cfg.finish).reseed(&model, &cfg.finish);
+        // Both parents off, both sub-options ticked. The ticks are kept
+        // (they are choices awaiting a parent), but neither may produce a
+        // tray argument: `launch_args` and `login_command` gate on the
+        // parent, which is what makes keeping the tick safe.
+        state.launch = false;
+        state.launch_tray = true;
+        state.login = false;
+        state.login_tray = true;
+        let out = state.reseed(&model, &cfg.finish);
+        assert!(out.launch_tray && out.login_tray, "the ticks are kept");
+        assert!(
+            !out.launch && !out.login,
+            "the parents keep the user's choice"
+        );
+        assert!(
+            model
+                .launch_args(&cfg, out.launch, out.launch_tray)
+                .is_empty(),
+            "no tray argument without a launch"
+        );
+        assert_eq!(
+            model.login_command(&cfg, "C:\\A\\a.exe", out.login, out.login_tray),
+            None,
+            "no login command without a login launch"
+        );
+    }
+
+    /// L17: the finish-page decisions are small but they end up in the
+    /// registry, where a wrong value means an app that silently fails to start
+    /// at login. These cases pin the edges.
+    #[test]
+    fn login_command_edges() {
+        let mut cfg = ProjectConfig::default();
+        cfg.tray.supports_tray = true;
+        cfg.tray.tray_arg = "--tray".into();
+        let m = cfg.finish_model();
+
+        // Not chosen, or not offered: no command at all (not an empty one).
+        assert_eq!(m.login_command(&cfg, "C:\\A\\a.exe", false, true), None);
+
+        // Whitespace-only override falls back to tray_arg, and the fallback is
+        // trimmed: a Run value must not carry stray spaces.
+        cfg.tray.startup_tray_arg = "   ".into();
+        assert_eq!(cfg.tray.effective_startup_tray_arg(), "--tray");
+        assert_eq!(
+            m.login_command(&cfg, "C:\\A\\a.exe", true, true).as_deref(),
+            Some("\"C:\\A\\a.exe\" --tray")
+        );
+
+        // An override that itself carries padding is trimmed before embedding.
+        cfg.tray.startup_tray_arg = "  --tray --min  ".into();
+        assert_eq!(
+            m.login_command(&cfg, "C:\\A\\a.exe", true, true).as_deref(),
+            Some("\"C:\\A\\a.exe\" --tray --min")
+        );
+
+        // A tab is whitespace too: a whitespace-only override falls back to
+        // `tray_arg` exactly like the spaces above, rather than trimming to
+        // nothing and silently dropping the tray argument.
+        cfg.tray.startup_tray_arg = "\t".into();
+        assert_eq!(
+            cfg.tray.effective_startup_tray_arg(),
+            "--tray",
+            "a whitespace-only override falls back to tray_arg"
+        );
+        assert_eq!(
+            m.login_command(&cfg, "C:\\A\\a.exe", true, true).as_deref(),
+            Some("\"C:\\A\\a.exe\" --tray")
+        );
+
+        // Both trampoline characters reject the path: quoting cannot survive.
+        assert_eq!(m.login_command(&cfg, "C:\\a\"b.exe", true, true), None);
+        assert_eq!(m.login_command(&cfg, "C:\\a\nb.exe", true, true), None);
+        assert_eq!(m.login_command(&cfg, "C:\\a\tb.exe", true, true), None);
+
+        // A fragment starting with a quote would close the exe's quoting.
+        cfg.tray.startup_tray_arg = "\"--tray\"".into();
+        assert_eq!(m.login_command(&cfg, "C:\\A\\a.exe", true, true), None);
+
+        // Spaces in the exe path are fine: the path is quoted.
+        cfg.tray.startup_tray_arg = String::new();
+        assert_eq!(
+            m.login_command(&cfg, "C:\\Program Files\\My App\\a.exe", true, true)
+                .as_deref(),
+            Some("\"C:\\Program Files\\My App\\a.exe\" --tray")
+        );
+    }
+
+    #[test]
+    fn launch_args_edges() {
+        let mut cfg = ProjectConfig::default();
+        cfg.tray.supports_tray = true;
+        cfg.tray.tray_arg = "--tray".into();
+        let m = cfg.finish_model();
+
+        // Nothing to pass when launching normally.
+        assert!(m.launch_args(&cfg, true, false).is_empty());
+        // Nothing when the user declined the launch.
+        assert!(m.launch_args(&cfg, false, true).is_empty());
+        // The tray argument is a *fragment*: it splits on whitespace.
+        cfg.tray.tray_arg = "  --tray   --minimized  ".into();
+        assert_eq!(
+            m.launch_args(&cfg, true, true),
+            vec!["--tray".to_string(), "--minimized".to_string()]
+        );
+        // An empty or whitespace-only tray_arg contributes no arguments --
+        // never a single empty argument, which the app would see as "".
+        for blank in ["", "   ", "\t"] {
+            cfg.tray.tray_arg = blank.into();
+            assert!(
+                m.launch_args(&cfg, true, true).is_empty(),
+                "{blank:?} produced arguments"
+            );
+        }
+        // Hidden options are never applied even if the caller asks for them.
+        // Hiding the launch row also hides its tray sub-option.
+        cfg.tray.tray_arg = "--tray".into();
+        let mut no_launch = cfg.clone();
+        no_launch.finish.hide_launch_after_setup = true;
+        let no_launch_model = no_launch.finish_model();
+        assert!(!no_launch_model.show_launch_tray);
+        assert!(no_launch_model
+            .launch_args(&no_launch, true, true)
+            .is_empty());
+    }
+
     #[test]
     fn hidden_finish_options_stay_hidden() {
         let mut cfg = ProjectConfig::default();
@@ -921,6 +1535,52 @@ mod tests {
         assert_eq!(safe_file_name("a/b:c"), "a-b-c");
         assert_eq!(safe_file_name("..."), "App");
         assert_eq!(safe_file_name("CON"), "_CON");
+        assert_eq!(safe_file_name("NUL.txt"), "_NUL.txt");
+        assert_eq!(safe_file_name("  My App.  "), "My App");
+        assert_eq!(safe_file_name("a\tb"), "a-b");
+    }
+
+    /// M13: one function now names folders, shortcuts and output files on
+    /// every surface, so the properties that matter have to hold for all of
+    /// them — not just for the CLI's call site.
+    #[test]
+    fn safe_file_name_is_usable_as_a_windows_component() {
+        let long = "Ä".repeat(400);
+        for raw in [
+            "My App",
+            "NUL",
+            "COM1.exe",
+            "..",
+            "a/b\\c:d*e?f\"g<h>i|j",
+            " spaced ",
+            "trailing.",
+            "",
+            long.as_str(),
+        ] {
+            let out = safe_file_name(raw);
+            assert!(!out.is_empty(), "{raw:?} produced an empty name");
+            assert!(
+                out.chars().count() <= MAX_SAFE_NAME,
+                "{raw:?} produced {} chars",
+                out.chars().count()
+            );
+            assert!(
+                // Not `contains([..])`: an array of chars as a `Pattern`
+                // needs Rust 1.71 and the MSRV is 1.70.
+                !out.chars()
+                    .any(|c| matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')),
+                "{raw:?} -> {out:?} still has a forbidden character"
+            );
+            assert!(
+                !out.starts_with(' ') && !out.ends_with(' ') && !out.ends_with('.'),
+                "{raw:?} -> {out:?} would be silently rewritten by Windows"
+            );
+            let stem = out.split('.').next().unwrap_or(&out);
+            assert!(
+                !is_reserved_device_name(stem),
+                "{raw:?} -> {out:?} is still a reserved device name"
+            );
+        }
     }
 
     #[test]
