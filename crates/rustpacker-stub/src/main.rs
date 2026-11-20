@@ -81,7 +81,8 @@ mod imp {
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-        GetWindowTextW, KillTimer, LoadCursorW, MessageBoxW, PostMessageW, PostQuitMessage,
+        GetWindowTextW, KillTimer, LoadCursorW, LoadIconW, MessageBoxW, PostMessageW,
+        PostQuitMessage,
         RegisterClassExW, SendMessageW, SetTimer, SetWindowTextW, ShowWindow, TranslateMessage,
         BM_GETCHECK,
         BM_SETCHECK, BN_CLICKED, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, HMENU, IDC_ARROW, IDYES,
@@ -106,6 +107,10 @@ mod imp {
     const ID_CANCEL: i32 = 9003;
 
     const TIMER_TYPEWRITER: usize = 1;
+    /// Icon resource id, as embedded by `build.rs`. `LoadIconW` takes a
+    /// `PCWSTR`, so an integer id is cast through a pointer (windows-sys does
+    /// not export the `MAKEINTRESOURCE` macro).
+    const APP_ICON_ID: windows_sys::core::PCWSTR = 1 as _;
 
     // Install runs on a worker thread (see `run_install_on_page`), which
     // cannot touch windows: it posts these instead and the UI thread's window
@@ -2710,11 +2715,17 @@ mod imp {
             windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(std::ptr::null())
         };
         let class_name = windows_sys::core::w!("RustPackerWizard");
+        // The icon resource embedded by `build.rs` (resource id 1). Loading it
+        // here is what puts our icon in the title bar, on the taskbar button
+        // and in the Alt-Tab list, instead of the generic blank window icon.
+        let icon = unsafe { LoadIconW(hinstance, APP_ICON_ID) };
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
             style: CS_HREDRAW | CS_VREDRAW,
             lpfnWndProc: Some(wnd_proc),
             hInstance: hinstance,
+            hIcon: icon,
+            hIconSm: icon,
             hCursor: unsafe { LoadCursorW(std::ptr::null_mut(), IDC_ARROW) },
             hbrBackground: bg_brush,
             lpszClassName: class_name,
