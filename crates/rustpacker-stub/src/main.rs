@@ -308,23 +308,15 @@ mod imp {
         ))
     }
 
+    /// Sanitise a name for use as a component on disk (folder or `.lnk`).
+    ///
+    /// M13: this used to be a third, subtly different implementation (`_`
+    /// instead of `-`, no reserved-device handling, no length bound), so the
+    /// same app name produced different folder and shortcut spellings. It now
+    /// delegates to the same core function the CLI and GUI use, so every
+    /// surface agrees.
     fn sanitize_folder(name: &str) -> String {
-        let cleaned: String = name
-            .chars()
-            .map(|c| {
-                if "<>:\"/\\|?*".contains(c) || (c as u32) < 32 {
-                    '_'
-                } else {
-                    c
-                }
-            })
-            .collect();
-        let trimmed = cleaned.trim().trim_end_matches('.').trim();
-        if trimmed.is_empty() {
-            "App".to_string()
-        } else {
-            trimmed.to_string()
-        }
+        rustpacker_core::schema::safe_file_name(name)
     }
 
     /// Default install dir: per-user `%LOCALAPPDATA%\Programs\<App>`,

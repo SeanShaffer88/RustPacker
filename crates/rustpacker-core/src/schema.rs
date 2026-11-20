@@ -514,6 +514,12 @@ fn is_reserved_device_name(stem: &str) -> bool {
 /// when nothing usable remains. Reserved device names get a `_`
 /// prefix. This is the single implementation shared by the CLI and
 /// the GUI so both produce identical output file names.
+/// Longest stem `safe_file_name` returns, in characters.
+///
+/// Windows limits a single path component to 255 characters; the buffer is
+/// bounded so a pathological app name cannot produce an uncreatable folder.
+pub const MAX_SAFE_NAME: usize = 120;
+
 pub fn safe_file_name(raw: &str) -> String {
     let mut out = String::new();
     for c in raw.chars() {
@@ -527,11 +533,14 @@ pub fn safe_file_name(raw: &str) -> String {
     if trimmed.is_empty() {
         return "App".to_string();
     }
-    let stem = trimmed.split('.').next().unwrap_or(trimmed);
+    // Bound the length *after* trimming, counting characters (not bytes) so
+    // a name of multi-byte characters is not cut mid-grapheme by the caller.
+    let trimmed: String = trimmed.chars().take(MAX_SAFE_NAME).collect();
+    let stem = trimmed.split('.').next().unwrap_or(&trimmed);
     if is_reserved_device_name(stem) {
         format!("_{trimmed}")
     } else {
-        trimmed.to_string()
+        trimmed
     }
 }
 
@@ -1124,6 +1133,53 @@ mod tests {
         assert_eq!(safe_file_name("a/b:c"), "a-b-c");
         assert_eq!(safe_file_name("..."), "App");
         assert_eq!(safe_file_name("CON"), "_CON");
+        assert_eq!(safe_file_name("NUL.txt"), "_NUL.txt");
+        assert_eq!(safe_file_name("  My App.  "), "My App");
+        assert_eq!(safe_file_name("a\tb"), "a-b");
+    }
+
+    /// M13: one function now names folders, shortcuts and output files on
+    /// every surface, so the properties that matter have to hold for all of
+    /// them — not just for the CLI's call site.
+    #[test]
+    fn safe_file_name_is_usable_as_a_windows_component() {
+        let long = "Ä".repeat(400);
+        for raw in [
+            "My App",
+            "NUL",
+            "COM1.exe",
+            "..",
+            "a/b\\c:d*e?f\"g<h>i|j",
+            " spaced ",
+            "trailing.",
+            "",
+            long.as_str(),
+        ] {
+            let out = safe_file_name(raw);
+            assert!(!out.is_empty(), "{raw:?} produced an empty name");
+            assert!(
+                out.chars().count() <= MAX_SAFE_NAME,
+                "{raw:?} produced {} chars",
+                out.chars().count()
+            );
+            assert!(
+                // Not `contains([..])`: an array of chars as a `Pattern`
+                // needs Rust 1.71 and the MSRV is 1.70.
+                !out
+                    .chars()
+                    .any(|c| matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')),
+                "{raw:?} -> {out:?} still has a forbidden character"
+            );
+            assert!(
+                !out.starts_with(' ') && !out.ends_with(' ') && !out.ends_with('.'),
+                "{raw:?} -> {out:?} would be silently rewritten by Windows"
+            );
+            let stem = out.split('.').next().unwrap_or(&out);
+            assert!(
+                !is_reserved_device_name(stem),
+                "{raw:?} -> {out:?} is still a reserved device name"
+            );
+        }
     }
 
     #[test]

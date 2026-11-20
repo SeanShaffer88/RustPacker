@@ -49,3 +49,26 @@ jobs:
         run: |
           head -c 60000 diag.md > d.md || true
           gh pr comment 6 --body-file d.md
+      # Summaries survive log retention and are readable with a plain API
+      # call, which is how this sandbox gets at them.
+      - name: Summarise deny
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '### deny'
+            echo '```'
+            cargo deny check 2>&1 | tail -n 60
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY" || true
+      - name: Summarise clippy (linux, verbose)
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '### clippy errors'
+            echo '```'
+            cargo clippy --workspace --all-targets -- -D warnings 2>&1 \
+              | grep -E '^(error|warning)(\[|:)' -A 6 | head -n 400
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY" || true
