@@ -90,125 +90,62 @@ const RT_MANIFEST: u32 = 24;
 // .res container
 // ---------------------------------------------------------------------------
 //
-// Layout:
-//   IMAGE_RESOURCE_DIRECTORY            (root, 16 bytes + 8 per type)
-//     IMAGE_RESOURCE_DIRECTORY          (one per resource type)
-//       IMAGE_RESOURCE_DIRECTORY        (one per resource name/id)
-//         IMAGE_RESOURCE_DATA_ENTRY     -> offset/size in the data section
-//   ...data section: [size][payload][padding] per resource...
+// A `.res` file is *not* the PE image's resource directory. It is a flat
+// sequence of records, one per resource, which `cvtres`/`llvm-cvtres` later
+// packs into the PE's three-level directory tree. Each record is (see
+// `WinResHeaderPrefix` / `WinResHeaderSuffix` in LLVM's `WindowsResource.h`):
 //
-// The root has no names (everything is an ordinal id), and every level is
-// 32-bit aligned. Offsets in directory entries are relative to the start of
-// the file; the high bit marks a subdirectory instead of a leaf.
+//   [u32 DataSize] [u32 HeaderSize]
+//   [type] [name]                 each: u16 0xFFFF + u16 ordinal, or a
+//                                 NUL-terminated UTF-16 string
+//   [pad to 4]
+//   [u32 DataVersion] [u16 MemoryFlags] [u16 language] [u32 version]
+//   [u32 characteristics]
+//   payload ...                   then padded to the next 4-byte boundary
+//
+// `HeaderSize` covers DataSize + HeaderSize + type + name + padding + suffix,
+// i.e. the number of bytes from the start of the record to the payload, and
+// `DataSize` is the unpadded payload length. Writing a PE-style directory
+// here is what makes `cvtres` fail with CVT1107 ("file is corrupt").
 
-const DIR_ENTRY_LEN: usize = 8;
-const DIR_HEADER_LEN: usize = 16;
-const DATA_ENTRY_LEN: usize = 16;
-/// Directory-entry flag: the offset points at another directory.
-const SUBDIR_FLAG: u32 = 0x8000_0000;
-/// Name field flag: the value is an ordinal id, not an offset into the names.
-const ID_FLAG: u32 = 0x8000_0000;
-
-/// `(type, [(id, data)])`, in first-seen order.
-type ResourceTree = Vec<(u32, Vec<(u32, Vec<u8>)>)>;
+/// `MOVEABLE | PURE`: what `rc.exe` uses for manifests and version info.
+const MEMORY_FLAGS: u16 = 0x0030;
+/// 0x0409 (en-US), `LANG_ENGLISH | SUBLANG_ENGLISH_US`.
+const RESOURCE_LANG: u16 = 0x0409;
 
 fn build_res(resources: &[(u32, u32, Vec<u8>)]) -> Vec<u8> {
-    // Resource types, in first-seen order, each with its (id, data) children.
-    let mut types: ResourceTree = Vec::new();
+    let mut out: Vec<u8> = Vec::new();
     for (res_type, res_id, data) in resources {
-        match types.iter_mut().find(|(t, _)| t == res_type) {
-            Some((_, children)) => children.push((*res_id, data.clone())),
-            None => types.push((*res_type, vec![(*res_id, data.clone())])),
-        }
+        let header_at = out.len();
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes()); // DataSize
+        out.extend_from_slice(&0u32.to_le_bytes()); // HeaderSize, patched below
+        write_res_identifier(&mut out, *res_type);
+        write_res_identifier(&mut out, *res_id);
+        out.resize(out.len() + (4 - out.len() % 4) % 4, 0);
+
+        let header_size = (out.len() - header_at) as u32 + RES_HEADER_SUFFIX_LEN;
+        out[header_at + 4..header_at + 8].copy_from_slice(&header_size.to_le_bytes());
+
+        out.extend_from_slice(&0u32.to_le_bytes()); // DataVersion
+        out.extend_from_slice(&MEMORY_FLAGS.to_le_bytes());
+        out.extend_from_slice(&RESOURCE_LANG.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes()); // version
+        out.extend_from_slice(&0u32.to_le_bytes()); // characteristics
+        out.extend_from_slice(data);
+        out.resize(out.len() + (4 - data.len() % 4) % 4, 0);
     }
-
-    // Every directory at a level is the same size, so the layout can be
-    // computed in one pass before anything is written.
-    let root_len = DIR_HEADER_LEN + DIR_ENTRY_LEN * types.len();
-    let type_dirs_len: usize = types
-        .iter()
-        .map(|(_, children)| DIR_HEADER_LEN + DIR_ENTRY_LEN * children.len())
-        .sum();
-    let leaf_dirs_len: usize = types
-        .iter()
-        .map(|(_, children)| DIR_HEADER_LEN + DIR_ENTRY_LEN * children.len())
-        .sum();
-    let data_entries_len = DATA_ENTRY_LEN * resources.len();
-
-    let root_off = 0usize;
-    let type_dirs_off = root_off + root_len;
-    let leaf_dirs_off = type_dirs_off + type_dirs_len;
-    let data_entries_off = leaf_dirs_off + leaf_dirs_len;
-    let data_off = data_entries_off + data_entries_len;
-
-    // Data section, recording each resource's offset and size as it is laid out.
-    let mut data: Vec<u8> = Vec::new();
-    let mut payload_offsets: Vec<(u32, u32)> = Vec::new();
-    for (_, _, bytes) in resources {
-        payload_offsets.push(((data_off + data.len()) as u32, bytes.len() as u32));
-        data.extend_from_slice(bytes);
-        // Every payload starts 4-byte aligned, so the data entries are too.
-        data.resize(data.len() + (4 - bytes.len() % 4) % 4, 0);
-    }
-
-    let mut out: Vec<u8> = Vec::with_capacity(data_off + data.len());
-
-    // ---- root directory -------------------------------------------------
-    write_dir_header(&mut out, 0, types.len());
-    let mut type_dir_cursor = type_dirs_off;
-    for (res_type, children) in &types {
-        write_dir_entry(&mut out, *res_type, (type_dir_cursor as u32) | SUBDIR_FLAG);
-        type_dir_cursor += DIR_HEADER_LEN + DIR_ENTRY_LEN * children.len();
-    }
-
-    // ---- one directory per type ----------------------------------------
-    let mut leaf_cursor = leaf_dirs_off;
-    for (_, children) in &types {
-        write_dir_header(&mut out, 0, children.len());
-        for (res_id, _) in children {
-            write_dir_entry(&mut out, *res_id, (leaf_cursor as u32) | SUBDIR_FLAG);
-            leaf_cursor += DIR_HEADER_LEN + DIR_ENTRY_LEN;
-        }
-    }
-
-    // ---- one directory per resource name -------------------------------
-    // Each has a single unnamed child whose offset points at the data entry.
-    let mut data_entry_cursor = data_entries_off;
-    for (_, children) in &types {
-        for _ in children {
-            write_dir_header(&mut out, 1, 0);
-            write_dir_entry(&mut out, 0, 0); // patched below with the real offset
-            let patch_at = out.len() - 4;
-            let real = (data_entry_cursor as u32).to_le_bytes();
-            out[patch_at..patch_at + 4].copy_from_slice(&real);
-            data_entry_cursor += DATA_ENTRY_LEN;
-        }
-    }
-
-    // ---- data entries ---------------------------------------------------
-    for (offset, size) in &payload_offsets {
-        out.extend_from_slice(&offset.to_le_bytes());
-        out.extend_from_slice(&size.to_le_bytes());
-        out.extend_from_slice(&0u32.to_le_bytes()); // code page
-        out.extend_from_slice(&0u32.to_le_bytes()); // reserved
-    }
-
-    debug_assert_eq!(out.len(), data_off, "directory layout drifted");
-    out.extend_from_slice(&data);
     out
 }
 
-fn write_dir_header(out: &mut Vec<u8>, named: usize, ids: usize) {
-    out.extend_from_slice(&0u32.to_le_bytes()); // characteristics
-    out.extend_from_slice(&0u32.to_le_bytes()); // timestamp
-    out.extend_from_slice(&0u32.to_le_bytes()); // major/minor version
-    out.extend_from_slice(&(named as u16).to_le_bytes()); // named entries
-    out.extend_from_slice(&(ids as u16).to_le_bytes()); // id entries
-}
+/// Bytes after the type/name identifiers: DataVersion, MemoryFlags, language,
+/// version and characteristics.
+const RES_HEADER_SUFFIX_LEN: u32 = 4 + 2 + 2 + 4 + 4;
 
-fn write_dir_entry(out: &mut Vec<u8>, id: u32, offset: u32) {
-    out.extend_from_slice(&(ID_FLAG | id).to_le_bytes());
-    out.extend_from_slice(&offset.to_le_bytes());
+/// A resource identifier: `0xFFFF` + ordinal, which is what `rc.exe` emits
+/// for every resource this project uses (all of them are integer ids).
+fn write_res_identifier(out: &mut Vec<u8>, id: u32) {
+    out.extend_from_slice(&0xFFFFu16.to_le_bytes());
+    out.extend_from_slice(&(id as u16).to_le_bytes());
 }
 
 // ---------------------------------------------------------------------------
@@ -256,7 +193,7 @@ fn manifest_bytes(app: &AppInfo) -> Vec<u8> {
 
 const ICON_SIZE: u32 = 32;
 
-/// A 32×32 32bpp icon in ICO form: a dark terminal window with a green
+/// A 32×32 32bpp icon as a bare DIB: a dark terminal window with a green
 /// prompt, matching the wizard's One Dark palette.
 fn icon_bytes(glyph: IconGlyph) -> Vec<u8> {
     // The AND mask is 1 bit per pixel, rows padded to 4 bytes. Written as
@@ -290,20 +227,11 @@ fn icon_bytes(glyph: IconGlyph) -> Vec<u8> {
     }
     dib.resize(dib.len() + and_len, 0);
 
-    let mut ico = Vec::with_capacity(6 + 16 + dib.len());
-    ico.extend_from_slice(&0u16.to_le_bytes()); // reserved
-    ico.extend_from_slice(&1u16.to_le_bytes()); // type: icon
-    ico.extend_from_slice(&1u16.to_le_bytes()); // count
-    ico.push(ICON_SIZE as u8);
-    ico.push(ICON_SIZE as u8);
-    ico.push(0); // palette colours
-    ico.push(0); // reserved
-    ico.extend_from_slice(&1u16.to_le_bytes()); // planes
-    ico.extend_from_slice(&32u16.to_le_bytes()); // bit count
-    ico.extend_from_slice(&(dib.len() as u32).to_le_bytes());
-    ico.extend_from_slice(&(6 + 16u32).to_le_bytes()); // DIB offset
-    ico.extend_from_slice(&dib);
-    ico
+    // `RT_ICON` wants the bare DIB, **not** an `.ico` container: the loader
+    // passes the resource bytes straight to `CreateIconFromResourceEx`. The
+    // container with its 22-byte header belongs in an `.ico` file on disk,
+    // and `RT_GROUP_ICON` (below) stands in for that header here.
+    dib
 }
 
 /// Colour of the icon at `(x, y)` (origin top-left) as `(r, g, b, a)`.
@@ -366,7 +294,10 @@ fn inside_rounded(x: u32, y: u32, rx: u32, ry: u32, w: u32, h: u32, radius: u32)
 }
 
 /// `GRPICONDIR`: points Explorer at the single ICON resource.
-fn group_icon_bytes(icon: &[u8]) -> Vec<u8> {
+/// The `RT_GROUP_ICON` payload: a `GRPICONDIR` with one `GRPICONDIRENTRY`,
+/// which is what makes Explorer pick our icon for the file and the shell cache
+/// it by resource id. `bytes_in_res` is the DIB length, matching `RT_ICON`.
+fn group_icon_bytes(dib: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(6 + 14);
     out.extend_from_slice(&0u16.to_le_bytes()); // reserved
     out.extend_from_slice(&1u16.to_le_bytes()); // type: icon
@@ -377,7 +308,7 @@ fn group_icon_bytes(icon: &[u8]) -> Vec<u8> {
     out.push(0); // reserved
     out.extend_from_slice(&1u16.to_le_bytes()); // planes
     out.extend_from_slice(&32u16.to_le_bytes()); // bit count
-    out.extend_from_slice(&(icon.len() as u32).to_le_bytes());
+    out.extend_from_slice(&(dib.len() as u32).to_le_bytes());
     out.extend_from_slice(&1u16.to_le_bytes()); // resource id
     out
 }

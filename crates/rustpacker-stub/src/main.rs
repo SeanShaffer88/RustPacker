@@ -41,10 +41,9 @@ fn main() {
 #[cfg(windows)]
 mod imp {
     use rustpacker_core::{
-        extract_payload, extract_payload_with_progress, find_payload, read_manifest, sha256_hex,
-        InstallJournal, InstallScope,
-        JournalAction, PayloadManifest, Prerequisite, ProjectConfig, Typewriter, JOURNAL_FILE_NAME,
-        UNINSTALLER_FILE_NAME,
+        extract_payload_with_progress, find_payload, read_manifest, sha256_hex, InstallJournal,
+        InstallScope, JournalAction, PayloadManifest, Prerequisite, ProjectConfig, Typewriter,
+        JOURNAL_FILE_NAME, UNINSTALLER_FILE_NAME,
     };
     use std::cell::RefCell;
     use std::collections::HashSet;
@@ -82,13 +81,12 @@ mod imp {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
         GetWindowTextW, KillTimer, LoadCursorW, LoadIconW, MessageBoxW, PostMessageW,
-        PostQuitMessage,
-        RegisterClassExW, SendMessageW, SetTimer, SetWindowTextW, ShowWindow, TranslateMessage,
-        BM_GETCHECK,
-        BM_SETCHECK, BN_CLICKED, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, HMENU, IDC_ARROW, IDYES,
-        MB_DEFBUTTON2, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK, MB_YESNO, MSG,
-        STN_CLICKED, SW_SHOWNORMAL, WM_COMMAND, WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC,
-        WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_PARENTNOTIFY, WM_SETFONT, WM_TIMER, WNDCLASSEXW,
+        PostQuitMessage, RegisterClassExW, SendMessageW, SetTimer, SetWindowTextW, ShowWindow,
+        TranslateMessage, BM_GETCHECK, BM_SETCHECK, BN_CLICKED, CS_HREDRAW, CS_VREDRAW,
+        CW_USEDEFAULT, HMENU, IDC_ARROW, IDYES, MB_DEFBUTTON2, MB_ICONERROR, MB_ICONINFORMATION,
+        MB_ICONQUESTION, MB_OK, MB_YESNO, MSG, STN_CLICKED, SW_SHOWNORMAL, WM_COMMAND,
+        WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN,
+        WM_PARENTNOTIFY, WM_SETFONT, WM_TIMER, WNDCLASSEXW,
     };
 
     // Control IDs.
@@ -105,6 +103,9 @@ mod imp {
     const ID_BACK: i32 = 9001;
     const ID_NEXT: i32 = 9002;
     const ID_CANCEL: i32 = 9003;
+    /// `MessageBoxW` return values. `IDYES` comes from windows-sys; `IDNO`
+    /// (7) is not exported, so name it here rather than leaving a magic 7.
+    const ID_NO: i32 = 7;
 
     const TIMER_TYPEWRITER: usize = 1;
     /// Icon resource id, as embedded by `build.rs`. `LoadIconW` takes a
@@ -220,7 +221,11 @@ mod imp {
     /// Reference-counted payload: the wizard state snapshots it on every
     /// page change, so it must be cheap to clone. Cloning this bumps a
     /// refcount instead of copying the installer image.
-    type SharedPayload = std::rc::Rc<Payload>;
+    ///
+    /// `Arc`, not `Rc` — the install runs on a worker thread and takes an
+    /// owned clone with it. The UI-thread-only wizard state never needs it,
+    /// but the shared payload has to cross the thread boundary.
+    type SharedPayload = std::sync::Arc<Payload>;
 
     fn load_config() -> Result<(ProjectConfig, bool, Option<SharedPayload>), String> {
         let exe =
@@ -251,7 +256,7 @@ mod imp {
         Ok((
             cfg,
             true,
-            Some(std::rc::Rc::new(Payload {
+            Some(std::sync::Arc::new(Payload {
                 exe: bytes,
                 manifest,
             })),
@@ -1138,10 +1143,8 @@ mod imp {
             // Extraction reports bytes; map them onto the 20–65% band of
             // the bar so a large payload visibly moves instead of sitting
             // at a constant "Extracting files...".
-            let extracted = extract_payload_with_progress(
-                &payload.exe,
-                &dest,
-                &mut |done, total, path| {
+            let extracted =
+                extract_payload_with_progress(&payload.exe, &dest, &mut |done, total, path| {
                     check_canceled()?;
                     let percent = if total == 0 {
                         20
@@ -1150,8 +1153,7 @@ mod imp {
                     };
                     report(percent, &format!("Extracting {path}..."));
                     Ok(())
-                },
-            )?;
+                })?;
             debug_assert_eq!(extracted.len(), manifest.files.len());
             // The app the installer promises must actually be there.
             let main_exe = dest.join(&cfg.app.main_exe);
@@ -1563,8 +1565,8 @@ mod imp {
     /// window procedure picks it up when it handles `WM_INSTALL_PROGRESS`.
     static PROGRESS_TEXT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
-    /// The finished install, parked by the worker thread for the UI thread
-    /// to pick up when it handles `WM_INSTALL_DONE`.
+    // The finished install, parked by the worker thread for the UI thread
+    // to pick up when it handles `WM_INSTALL_DONE`.
     thread_local! {
         static INSTALL_RESULT: RefCell<Option<Result<InstallOutcome, String>>> =
             const { RefCell::new(None) };
@@ -1893,7 +1895,7 @@ mod imp {
             cfg: cfg.clone(),
             install_dir: install_dir.to_string(),
             payload: payload.cloned(),
-            hwnd,
+            hwnd: WindowHandle(hwnd),
         };
         // If the thread cannot be spawned we run inline: a frozen window is
         // still better than an installer that silently does nothing.
@@ -1911,13 +1913,35 @@ mod imp {
         }
     }
 
+    /// A window handle that may cross a thread boundary.
+    ///
+    /// `HWND` is a `*mut c_void`, so it is neither `Send` nor `Sync`. That is
+    /// correct for `SendMessageW` (which runs the window procedure on the
+    /// calling thread), but this worker only ever calls `PostMessageW`, which
+    /// is explicitly thread-safe: it just appends to the window's queue. The
+    /// wrapper records that reasoning in one place instead of scattering
+    /// `unsafe impl` around.
+    #[derive(Clone, Copy)]
+    struct WindowHandle(HWND);
+
+    // SAFETY: the handle is only used with `PostMessageW`, documented as
+    // callable from any thread, and the window outlives the worker because
+    // the UI thread refuses to destroy it until `WM_INSTALL_DONE` arrives.
+    unsafe impl Send for WindowHandle {}
+
+    impl WindowHandle {
+        fn post(self, msg: u32, wparam: WPARAM, lparam: LPARAM) -> bool {
+            unsafe { PostMessageW(self.0, msg, wparam, lparam) != 0 }
+        }
+    }
+
     /// Everything the worker thread needs, owned so nothing is borrowed
     /// across the thread boundary.
     struct InstallJob {
         cfg: ProjectConfig,
         install_dir: String,
         payload: Option<SharedPayload>,
-        hwnd: HWND,
+        hwnd: WindowHandle,
     }
 
     /// Show the progress bar at `percent` (0–100) with `text` beside it.
@@ -1945,7 +1969,7 @@ mod imp {
             if let Ok(mut slot) = PROGRESS_TEXT.lock() {
                 *slot = Some(text.to_string());
             }
-            let _ = unsafe { PostMessageW(hwnd, WM_INSTALL_PROGRESS, percent as WPARAM, 0) };
+            hwnd.post(WM_INSTALL_PROGRESS, percent as WPARAM, 0);
         });
 
         // Park the result where the UI thread can retrieve it: an
@@ -1954,14 +1978,11 @@ mod imp {
         INSTALL_RESULT.with(|slot| {
             *slot.borrow_mut() = Some(outcome);
         });
-        let _ = unsafe { PostMessageW(hwnd, WM_INSTALL_DONE, 0, 0) };
+        hwnd.post(WM_INSTALL_DONE, 0, 0);
     }
 
     /// Apply a finished install (success or failure) on the UI thread.
-    fn finish_on_ui_thread(
-        cfg: &ProjectConfig,
-        outcome: Result<InstallOutcome, String>,
-    ) {
+    fn finish_on_ui_thread(cfg: &ProjectConfig, outcome: Result<InstallOutcome, String>) {
         match outcome {
             Ok(done) => {
                 with_state(|s| {
@@ -2468,12 +2489,11 @@ mod imp {
                                 // WM_INSTALL_DONE with the result, so the
                                 // window is never torn down underneath it.
                                 CANCEL.store(true, Ordering::SeqCst);
-                                let status = with_state(|s| s.status)
-                                    .unwrap_or(std::ptr::null_mut());
+                                let status =
+                                    with_state(|s| s.status).unwrap_or(std::ptr::null_mut());
                                 set_text(status, "Cancelling...");
                                 set_enabled(
-                                    with_state(|s| s.cancel_hwnd)
-                                        .unwrap_or(std::ptr::null_mut()),
+                                    with_state(|s| s.cancel_hwnd).unwrap_or(std::ptr::null_mut()),
                                     false,
                                 );
                             } else if with_state(|s| s.install_done).unwrap_or(false) {
@@ -2488,14 +2508,23 @@ mod imp {
                                              Choose No to uninstall it now.",
                                         )),
                                         pcw(&wide("Cancel Setup")),
-                                        MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON1,
+                                        // `MB_DEFBUTTON1` is 0, so windows-sys
+                                        // does not export it; `IDYES`/`IDNO`
+                                        // are not exported either.
+                                        MB_YESNO | MB_ICONQUESTION,
                                     )
                                 };
-                                if answer != IDNO {
+                                if answer != ID_NO {
                                     let _ = unsafe { DestroyWindow(hwnd) };
                                 } else {
+                                    // Every change the install made is in the
+                                    // journal, so replaying it backwards is
+                                    // enough: no `install_dir` needed.
                                     if let Some(journal) = with_state(|s| s.journal.clone()) {
-                                        let _ = rollback_journal(&journal, &journal.install_dir);
+                                        let dir = journal.install_dir.clone();
+                                        for warning in rollback_journal(&journal, &dir) {
+                                            eprintln!("uninstall: {warning}");
+                                        }
                                     }
                                     let _ = unsafe { DestroyWindow(hwnd) };
                                 }
