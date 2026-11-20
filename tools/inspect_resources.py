@@ -39,7 +39,13 @@ REQUIRED = {"RT_ICON", "RT_GROUP_ICON", "RT_VERSION", "RT_MANIFEST"}
 #   payload [pad]
 # Each of type/name is u16 0xFFFF + u16 ordinal, or a NUL-terminated UTF-16
 # string. HeaderSize counts from the record start to the payload.
-SUFFIX_LEN = 4 + 2 + 2 + 4 + 4
+#
+# A file starts with a 32-byte prologue — a record-shaped header (DataSize 0,
+# HeaderSize 32) plus a 16-byte zero null entry — which every reader skips.
+# HeaderSize must be >= 32 (LLVM's MIN_HEADER_SIZE); a smaller one means the
+# file is malformed even if the rest parses.
+MIN_HEADER_SIZE = 7 * 4 + 2 * 2
+PROLOGUE_LEN = 32
 
 
 def read_identifier(blob, pos):
@@ -57,9 +63,23 @@ def read_identifier(blob, pos):
 
 def parse_res(blob):
     """Yield (type_name, id, language, payload) for each record."""
-    pos = 0
+    if len(blob) < PROLOGUE_LEN:
+        raise ValueError("file is shorter than the 32-byte prologue")
+    magic_size, magic_header = struct.unpack_from("<II", blob, 0)
+    if magic_size != 0 or magic_header != PROLOGUE_LEN:
+        raise ValueError(
+            f"bad magic header: DataSize {magic_size}, HeaderSize {magic_header}"
+            " (want 0 and 32)"
+        )
+    if any(blob[16:PROLOGUE_LEN]):
+        raise ValueError("null entry is not all zero")
+    pos = PROLOGUE_LEN
     while pos < len(blob):
         data_size, header_size = struct.unpack_from("<II", blob, pos)
+        if header_size < MIN_HEADER_SIZE:
+            raise ValueError(
+                f"record at {pos:#x}: HeaderSize {header_size} < {MIN_HEADER_SIZE}"
+            )
         res_type, after_type = read_identifier(blob, pos + 8)
         res_id, after_id = read_identifier(blob, after_type)
         payload_at = pos + header_size

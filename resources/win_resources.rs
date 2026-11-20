@@ -105,8 +105,20 @@ const RT_MANIFEST: u32 = 24;
 //
 // `HeaderSize` covers DataSize + HeaderSize + type + name + padding + suffix,
 // i.e. the number of bytes from the start of the record to the payload, and
-// `DataSize` is the unpadded payload length. Writing a PE-style directory
-// here is what makes `cvtres` fail with CVT1107 ("file is corrupt").
+// `DataSize` is the unpadded payload length.
+//
+// Two requirements are easy to miss, and both make `link.exe`/`cvtres` reject
+// the whole file with "invalid or corrupt file" (CVT1107 / LNK1136):
+//
+// 1. A 32-byte prologue: a 16-byte record-shaped header with `HeaderSize` 32
+//    and zero size, then a 16-byte all-zero "null entry". Every reader skips
+//    exactly those 32 bytes before the first real record.
+// 2. `HeaderSize` must be at least 32 — LLVM's reader rejects anything smaller
+//    (`MIN_HEADER_SIZE = 7 * u32 + 2 * u16`). With integer type and name ids
+//    the header is exactly 32 bytes, so there is no room to be sloppy.
+//
+// Writing a PE-style directory here instead is what produced CVT1107 in the
+// first place.
 
 /// `MOVEABLE | PURE`: what `rc.exe` uses for manifests and version info.
 const MEMORY_FLAGS: u16 = 0x0030;
@@ -114,7 +126,20 @@ const MEMORY_FLAGS: u16 = 0x0030;
 const RESOURCE_LANG: u16 = 0x0409;
 
 fn build_res(resources: &[(u32, u32, Vec<u8>)]) -> Vec<u8> {
-    let mut out: Vec<u8> = Vec::new();
+    let mut out: Vec<u8> = Vec::with_capacity(RES_PROLOGUE_LEN + 4096);
+
+    // ---- prologue -------------------------------------------------------
+    // A record-shaped header with no payload: DataSize 0, HeaderSize 32,
+    // type 0, name 0. `cvtres` compares this against what it expects and
+    // readers simply skip it.
+    out.extend_from_slice(&0u32.to_le_bytes()); // DataSize
+    out.extend_from_slice(&RES_PROLOGUE_LEN.to_le_bytes()); // HeaderSize
+    write_res_identifier(&mut out, 0);
+    write_res_identifier(&mut out, 0);
+    out.extend_from_slice(&[0u8; RES_HEADER_SUFFIX_LEN as usize]); // suffix
+    // ...followed by the 16-byte null entry.
+    out.extend_from_slice(&[0u8; RES_NULL_ENTRY_LEN as usize]);
+
     for (res_type, res_id, data) in resources {
         let header_at = out.len();
         out.extend_from_slice(&(data.len() as u32).to_le_bytes()); // DataSize
@@ -140,6 +165,11 @@ fn build_res(resources: &[(u32, u32, Vec<u8>)]) -> Vec<u8> {
 /// Bytes after the type/name identifiers: DataVersion, MemoryFlags, language,
 /// version and characteristics.
 const RES_HEADER_SUFFIX_LEN: u32 = 4 + 2 + 2 + 4 + 4;
+/// Bytes every `.res` starts with: the 16-byte magic header plus the null
+/// entry. `MIN_HEADER_SIZE` in LLVM's reader is this same 32.
+const RES_PROLOGUE_LEN: u32 = 32;
+/// The all-zero record that follows the magic header.
+const RES_NULL_ENTRY_LEN: u32 = 16;
 
 /// A resource identifier: `0xFFFF` + ordinal, which is what `rc.exe` emits
 /// for every resource this project uses (all of them are integer ids).
