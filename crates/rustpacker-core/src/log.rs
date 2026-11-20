@@ -112,7 +112,9 @@ impl InstallLog {
             failed: false,
             written: 0,
         };
-        log.note("---- RustPacker install log ----");
+        // The header goes through `write_line` directly: it is not a step,
+        // so it has no elapsed time and must not look like one.
+        log.write_line("---- RustPacker install log ----");
         Ok(log)
     }
 
@@ -273,6 +275,7 @@ mod tests {
         let text = std::fs::read_to_string(&path).expect("read");
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], "---- RustPacker install log ----");
+        assert!(!lines[0].starts_with('+'), "the header is not a step");
         assert!(lines[1].ends_with("first step"), "{:?}", lines[1]);
         assert!(lines[2].ends_with("second step"));
         assert!(lines[3].ends_with("ERROR something broke"));

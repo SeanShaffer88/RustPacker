@@ -1198,15 +1198,8 @@ mod win {
             // — turning tray support on, or hiding the launch row. Re-seeding
             // *every* checkbox threw away the toggles the user had already
             // made to unrelated options, so the preview silently disagreed
-            // with what they had just clicked.
-            //
-            // Freshly-appearing options now take their configured default;
-            // options that were already visible, and options that have just
-            // been hidden (so they reappear as the user left them), keep the
-            // user's choice.
-            app.preview = app
-                .preview
-                .reseed(app.last_model.as_ref(), &model, &app.cfg.finish);
+            // with what they had just clicked. The rule now lives in core.
+            app.preview = app.preview.reseed(&model, &app.cfg.finish);
             app.last_model = Some(model.clone());
         }
         let (title, body) = preview_texts(app, &model);

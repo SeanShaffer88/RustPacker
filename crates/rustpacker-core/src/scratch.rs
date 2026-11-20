@@ -35,8 +35,15 @@ impl ScratchDir {
     }
 
     /// Create a fresh directory and return a path inside it (`name`).
+    /// Create a scratch directory and return a path *inside* it.
+    ///
+    /// The directory has to outlive this call, so the [`ScratchDir`] is
+    /// leaked rather than returned: a temporary here would be dropped at the
+    /// end of the statement and delete the parent before the caller used it.
+    /// The caller owns cleanup, or the OS does when the temp tree is purged.
     pub fn with_file(prefix: &str, name: &str) -> PathBuf {
-        Self::new(prefix).path.join(name)
+        let dir = Box::leak(Box::new(Self::new(prefix)));
+        dir.path.join(name)
     }
 
     pub fn path(&self) -> &Path {
