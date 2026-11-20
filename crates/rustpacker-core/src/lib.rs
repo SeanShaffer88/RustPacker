@@ -17,11 +17,12 @@ pub use journal::{
 };
 pub use log::{InstallLog, StderrLog, LOG_FILE_NAME};
 pub use payload::{
-    extract_payload, extract_payload_with_progress, find_payload, normalized_rel_str,
-    pack_directory, pack_files, read_manifest, sanitise_rel_path, sha256_hex, sha256sums_txt,
+    build_portable_zip, extract_payload, extract_payload_with_progress, find_payload,
+    normalized_rel_str, pack_directory, pack_files, portable_marker, read_manifest,
+    sanitise_rel_path, sha256_hex, sha256sums_txt,
     strip_payload, verify_payload, write_stored_zip, write_stored_zip_streaming, ExtractProgress,
     FileEntry, PackedInfo, PayloadManifest, ZipSource, CONFIG_ENTRY_NAME, FOOTER_LEN,
-    MAX_ARCHIVE_LEN, MAX_FILE_COUNT, OVERLAY_MAGIC,
+    MAX_ARCHIVE_LEN, MAX_FILE_COUNT, OVERLAY_MAGIC, PORTABLE_MARKER_NAME,
 };
 pub use schema::{
     is_bare_filename, safe_file_name, validate_install_dir, AppInfo, FileAssociation, FinishConfig,

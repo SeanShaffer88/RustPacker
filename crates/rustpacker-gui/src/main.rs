@@ -23,7 +23,9 @@ fn main() {
 
 #[cfg(windows)]
 mod win {
-    use rustpacker_core::payload::{pack_directory, sha256_hex, sha256sums_txt};
+    use rustpacker_core::payload::{
+        build_portable_zip, pack_directory, sha256_hex, sha256sums_txt,
+    };
     use rustpacker_core::{
         safe_file_name, FinishScreenModel, FinishSelection, InstallScope, ProjectConfig,
         TerminalTheme,
@@ -93,6 +95,7 @@ mod win {
     const ID_CHK_HIDE_DESKTOP: i32 = 1114;
     const ID_CHK_HIDE_LAUNCH: i32 = 1115;
     const ID_ED_STATUS: i32 = 1116;
+    const ID_CHK_PORTABLE: i32 = 1117;
 
     const ID_CB_PAGE: i32 = 1201;
     const ID_PV_PANEL: i32 = 1202;
@@ -245,6 +248,7 @@ mod win {
         chk_tray: HWND,
         chk_hide_desktop: HWND,
         chk_hide_launch: HWND,
+        chk_portable: HWND,
         lbl_status: HWND,
         ed_status: HWND,
         // right panel
@@ -289,6 +293,7 @@ mod win {
                 chk_tray: std::ptr::null_mut(),
                 chk_hide_desktop: std::ptr::null_mut(),
                 chk_hide_launch: std::ptr::null_mut(),
+                chk_portable: std::ptr::null_mut(),
                 lbl_status: std::ptr::null_mut(),
                 ed_status: std::ptr::null_mut(),
                 lbl_page: std::ptr::null_mut(),
@@ -310,6 +315,10 @@ mod win {
         cfg: ProjectConfig,
         output_dir: String,
         stub_path: String,
+        /// M14: build the portable ZIP alongside `Setup.exe`, like the CLI's
+        /// `--portable`. A build option rather than project data, so it is
+        /// not saved into the project file.
+        build_portable: bool,
         project_path: Option<PathBuf>,
         page: usize,
         // preview finish-page checkbox states (seeded from finish defaults
@@ -364,6 +373,7 @@ mod win {
                 cfg: ProjectConfig::default(),
                 output_dir: "dist".to_string(),
                 stub_path: String::new(),
+                build_portable: false,
                 project_path: None,
                 page: PAGE_FINISH,
                 preview: FinishSelection::from_defaults(&ProjectConfig::default().finish),
@@ -808,6 +818,13 @@ mod win {
             ID_CHK_HIDE_LAUNCH,
             app.font_ui,
         );
+        app.c.chk_portable = mk_check(
+            app,
+            parent,
+            "Also build portable .zip (no install needed)",
+            ID_CHK_PORTABLE,
+            app.font_ui,
+        );
         app.c.lbl_status = mk_label(app, parent, "Status", 0);
         app.c.ed_status = mk_edit(app, parent, ID_ED_STATUS, true);
 
@@ -875,6 +892,7 @@ mod win {
             app.c.chk_tray,
             app.c.chk_hide_desktop,
             app.c.chk_hide_launch,
+            app.c.chk_portable,
             app.c.lbl_status,
             app.c.ed_status,
         ]);
@@ -988,8 +1006,9 @@ mod win {
         move_to(app.c.chk_tray, chk_x, chk_y, chk_w, 22);
         move_to(app.c.chk_hide_desktop, chk_x, chk_y + 26, chk_w, 22);
         move_to(app.c.chk_hide_launch, chk_x, chk_y + 52, chk_w, 22);
+        move_to(app.c.chk_portable, chk_x, chk_y + 78, chk_w, 22);
 
-        let status_label_y = chk_y + 84;
+        let status_label_y = chk_y + 110;
         move_to(app.c.lbl_status, label_x, status_label_y, 124, 20);
         let status_y = status_label_y + 22;
         let status_h = (g.y + g.h - status_y - 10).max(30);
@@ -1105,6 +1124,7 @@ mod win {
         app.cfg.tray.supports_tray = get_check(app.c.chk_tray);
         app.cfg.finish.hide_desktop_shortcut = get_check(app.c.chk_hide_desktop);
         app.cfg.finish.hide_launch_after_setup = get_check(app.c.chk_hide_launch);
+        app.build_portable = get_check(app.c.chk_portable);
     }
 
     unsafe fn apply_config_to_ui(app: &mut App) {
@@ -1134,6 +1154,7 @@ mod win {
             app.c.chk_hide_launch,
             app.cfg.finish.hide_launch_after_setup,
         );
+        set_check(app.c.chk_portable, app.build_portable);
         app.refreshing = false;
     }
 
@@ -1597,20 +1618,55 @@ mod win {
             safe_file_name(&app.cfg.app.version)
         );
         let setup_path = out_dir.join(&setup_name);
+        // M14: the portable ZIP comes from the same manifest as the
+        // installer payload, through the same core builder the CLI's
+        // `--portable` uses, so the two surfaces ship identical exports.
+        let portable = if app.build_portable {
+            let bytes = build_portable_zip(&app.cfg, &source, &entries)?;
+            let name = format!(
+                "{}-v{}-Portable.zip",
+                safe_file_name(&app.cfg.app.name),
+                safe_file_name(&app.cfg.app.version)
+            );
+            let path = out_dir.join(&name);
+            Some((name, path, bytes))
+        } else {
+            None
+        };
         std::fs::write(&setup_path, &exe)
             .map_err(|e| format!("could not write {}: {e}", setup_path.display()))?;
-        let sums = sha256sums_txt(&[(setup_name.as_str(), exe.as_slice())]);
+        if let Some((_, portable_path, portable_bytes)) = &portable {
+            std::fs::write(portable_path, portable_bytes)
+                .map_err(|e| format!("could not write {}: {e}", portable_path.display()))?;
+        }
+        // Checksums last, covering every artefact produced above: a sums
+        // file that predates a failed write would vouch for bytes that are
+        // no longer the ones on disk.
+        let mut sum_items: Vec<(&str, &[u8])> = vec![(setup_name.as_str(), exe.as_slice())];
+        if let Some((portable_name, _, portable_bytes)) = &portable {
+            sum_items.push((portable_name.as_str(), portable_bytes.as_slice()));
+        }
+        let sums = sha256sums_txt(&sum_items);
         let sums_path = out_dir.join("SHA256SUMS.txt");
         std::fs::write(&sums_path, sums.as_bytes())
             .map_err(|e| format!("could not write {}: {e}", sums_path.display()))?;
-        Ok(format!(
+        let mut message = format!(
             "Build complete.\n\nSetup: {}\nFiles packed: {}\nSetup size: {} bytes\nSHA-256: {}\n\nChecksums: {}",
             setup_path.display(),
             entries.len(),
             exe.len(),
             sha256_hex(&exe),
             sums_path.display()
-        ))
+        );
+        if let Some((_, portable_path, portable_bytes)) = &portable {
+            message.push_str(&format!(
+                "\n\nPortable: {}\nPortable size: {} bytes\nPortable SHA-256: {}",
+                portable_path.display(),
+                portable_bytes.len(),
+                sha256_hex(portable_bytes)
+            ));
+        }
+        Ok(message)
     }
 
     unsafe fn do_build(app: &mut App) {

@@ -6,7 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **Builder Studio: portable ZIP builds.** An "Also build portable .zip"
+  option next to the finish-page options produces
+  `<App>-v<version>-Portable.zip` alongside `Setup.exe`, covered by the
+  same `SHA256SUMS.txt`. The export is assembled by core
+  `build_portable_zip` — the same function the CLI's `--portable` calls,
+  fed by the same pack manifest — so both surfaces ship identical ZIPs
+  (AUDIT M14).
 
 ## [0.1.0] - 2026-11-19
 
