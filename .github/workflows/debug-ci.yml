@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   pull-requests: write
 
 jobs:
@@ -14,11 +14,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: arena/3c5679ce-rustpacker
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
+      - name: Apply rustfmt
+        shell: bash
+        run: |
+          cargo fmt --all
+          if ! git diff --quiet; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add -A
+            git commit -m "style: apply rustfmt (automated)"
+            git push
+          fi
+
       - name: All checks with output
+        if: always()
         shell: bash
         run: |
           set +e
@@ -27,18 +42,17 @@ jobs:
             echo '### clippy'
             echo '```'
             cargo clippy --workspace --all-targets -- -D warnings 2>&1 \
-              | grep -vE '^\s+(Compiling|Checking|Finished|Downloading|Downloaded|Updating|Blocking|Locking|Adding)' | head -n 250
+              | grep -vE '^\s+(Compiling|Checking|Finished|Downloading|Downloaded|Updating|Blocking|Locking|Adding)' | head -n 200
             echo '```'
             echo '### test'
             echo '```'
-            cargo test --workspace 2>&1 | grep -vE '^\s+(Compiling|Checking|Finished|Downloading|Downloaded|Updating)' | tail -n 120
+            cargo test --workspace 2>&1 | grep -vE '^\s+(Compiling|Checking|Finished|Downloading|Downloaded|Updating)' | tail -n 150
             echo '```'
             echo '### fmt'
             echo '```'
-            cargo fmt --all -- --check 2>&1 | head -n 120
+            cargo fmt --all -- --check 2>&1 | head -n 40
             echo '```'
           } > diag.md
-          wc -c diag.md
 
       - name: Post diagnostics
         if: always()
@@ -47,4 +61,4 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           head -c 60000 diag.md > diag-truncated.md || true
-          gh pr comment 2 --body-file diag-truncated.md || echo "no PR open yet"
+          gh pr comment 2 --body-file diag-truncated.md
