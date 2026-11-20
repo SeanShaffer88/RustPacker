@@ -42,8 +42,8 @@ fn main() {
 mod imp {
     use rustpacker_core::{
         extract_payload, find_payload, read_manifest, sha256_hex, InstallJournal, InstallScope,
-        JournalAction, PayloadManifest, Prerequisite, ProjectConfig, Typewriter,
-        JOURNAL_FILE_NAME, UNINSTALLER_FILE_NAME,
+        JournalAction, PayloadManifest, Prerequisite, ProjectConfig, Typewriter, JOURNAL_FILE_NAME,
+        UNINSTALLER_FILE_NAME,
     };
     use std::cell::RefCell;
     use std::collections::HashSet;
@@ -173,11 +173,12 @@ mod imp {
             std::env::current_exe().map_err(|e| format!("could not locate this installer: {e}"))?;
         let bytes =
             std::fs::read(&exe).map_err(|e| format!("could not read this installer: {e}"))?;
-        let manifest = read_manifest(&bytes)
-            .map_err(|e| format!("this installer's payload is damaged and cannot be read:\n\n{e}"))?;
-        let json = manifest.config_json.ok_or_else(|| {
-            "this installer's payload has no project configuration".to_string()
+        let manifest = read_manifest(&bytes).map_err(|e| {
+            format!("this installer's payload is damaged and cannot be read:\n\n{e}")
         })?;
+        let json = manifest
+            .config_json
+            .ok_or_else(|| "this installer's payload has no project configuration".to_string())?;
         ProjectConfig::from_json(&json)
     }
 

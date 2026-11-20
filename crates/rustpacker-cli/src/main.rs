@@ -5,9 +5,7 @@
 //! extract the resulting `Setup.exe`. Argument parsing is hand-rolled
 //! (standard library only); `--json` selects machine-readable output.
 
-use rustpacker_core::payload::{
-    sha256_hex, sha256sums_txt, write_stored_zip_streaming, ZipSource,
-};
+use rustpacker_core::payload::{sha256_hex, sha256sums_txt, write_stored_zip_streaming, ZipSource};
 use rustpacker_core::{
     extract_payload, find_payload, pack_directory, read_manifest, safe_file_name, PayloadManifest,
     ProjectConfig,

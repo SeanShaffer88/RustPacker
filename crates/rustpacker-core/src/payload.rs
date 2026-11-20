@@ -196,7 +196,6 @@ pub fn normalized_rel_str(path: &str) -> Result<String, String> {
     Ok(parts.join("/"))
 }
 
-
 /// Facts about one packed file: what the archive repeats in front of its
 /// data, and all the manifest needs to report it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -350,8 +349,10 @@ fn build_payload(
     // Pair each header with its source, then order both together:
     // case-insensitive path order, tie-broken by exact bytes, so the output
     // is deterministic and independent of the host filesystem's ordering.
-    let mut sorted: Vec<(ArchiveHeader, Source<'_>)> =
-        headers.into_iter().zip(sources.iter().map(|(_, s)| *s)).collect();
+    let mut sorted: Vec<(ArchiveHeader, Source<'_>)> = headers
+        .into_iter()
+        .zip(sources.iter().map(|(_, s)| *s))
+        .collect();
     sorted.sort_by(|(a, _), (b, _)| {
         a.path
             .to_ascii_lowercase()
@@ -701,10 +702,9 @@ impl<R: Read> ArchiveReader<R> {
     fn verify_current(&mut self, hasher: Sha256) -> Result<(), String> {
         let digest: [u8; 32] = hasher.finalize().into();
         match &self.current {
-            Some(entry) if digest != entry.sha256 => Err(format!(
-                "SHA-256 mismatch for payload entry {}",
-                entry.path
-            )),
+            Some(entry) if digest != entry.sha256 => {
+                Err(format!("SHA-256 mismatch for payload entry {}", entry.path))
+            }
             _ => Ok(()),
         }
     }
@@ -757,8 +757,8 @@ fn open_archive(exe: &[u8]) -> Result<ArchiveReader<impl Read + '_>, String> {
     let len_usize = usize::try_from(info.payload_len)
         .map_err(|_| "payload bounds in footer do not match the file size")?;
     let payload = &exe[offset_usize..offset_usize + len_usize];
-    let decoder = zstd::Decoder::new(payload)
-        .map_err(|e| format!("payload decompression failed: {e}"))?;
+    let decoder =
+        zstd::Decoder::new(payload).map_err(|e| format!("payload decompression failed: {e}"))?;
     // `+1` so an archive that decompresses past its declared length is
     // detectable by `finish` instead of silently truncated.
     Ok(ArchiveReader::new(
@@ -780,8 +780,7 @@ pub fn read_manifest(exe: &[u8]) -> Result<PayloadManifest, String> {
             const MAX_CONFIG_BYTES: u64 = 8 * 1024 * 1024;
             let data = reader.read_current_to_vec(MAX_CONFIG_BYTES)?;
             config_json = Some(
-                String::from_utf8(data)
-                    .map_err(|_| "embedded config is not UTF-8".to_string())?,
+                String::from_utf8(data).map_err(|_| "embedded config is not UTF-8".to_string())?,
             );
         } else {
             reader.skip_current()?;
@@ -1050,9 +1049,7 @@ impl ZipSource<'_> {
 /// chunks instead of being handed over as slices, so building the portable
 /// export of a large project no longer keeps every file plus the finished
 /// ZIP in memory. Paths get the same validation as payload entries.
-pub fn write_stored_zip_streaming(
-    entries: &[(String, ZipSource<'_>)],
-) -> Result<Vec<u8>, String> {
+pub fn write_stored_zip_streaming(entries: &[(String, ZipSource<'_>)]) -> Result<Vec<u8>, String> {
     if entries.len() > MAX_ZIP_ENTRIES {
         return Err(format!(
             "too many portable ZIP entries ({} exceeds u16 range)",
@@ -1463,11 +1460,8 @@ mod tests {
         std::fs::write(&file_a, b"abc").expect("write");
         std::fs::write(&file_b, vec![0x42u8; 200_000]).expect("write");
 
-        let in_memory = write_stored_zip(&[
-            ("a.txt", b"abc"),
-            ("b.bin", &vec![0x42u8; 200_000]),
-        ])
-        .expect("memory zip");
+        let in_memory = write_stored_zip(&[("a.txt", b"abc"), ("b.bin", &vec![0x42u8; 200_000])])
+            .expect("memory zip");
         let streamed = write_stored_zip_streaming(&[
             ("a.txt".to_string(), ZipSource::Path(&file_a)),
             ("b.bin".to_string(), ZipSource::Path(&file_b)),
@@ -1481,21 +1475,17 @@ mod tests {
 
     #[test]
     fn streaming_zip_applies_the_same_path_rules() {
-        let base =
-            std::env::temp_dir().join(format!("rustpacker-ziprules-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("rustpacker-ziprules-{}", std::process::id()));
         std::fs::create_dir_all(&base).expect("mkdir");
         let file = base.join("x");
         std::fs::write(&file, b"x").expect("write");
-        assert!(write_stored_zip_streaming(&[(
-            "../evil.txt".to_string(),
-            ZipSource::Path(&file)
-        )])
-        .is_err());
-        assert!(write_stored_zip_streaming(&[(
-            "CON".to_string(),
-            ZipSource::Path(&file)
-        )])
-        .is_err());
+        assert!(
+            write_stored_zip_streaming(&[("../evil.txt".to_string(), ZipSource::Path(&file))])
+                .is_err()
+        );
+        assert!(
+            write_stored_zip_streaming(&[("CON".to_string(), ZipSource::Path(&file))]).is_err()
+        );
         assert!(write_stored_zip_streaming(&[
             ("a.txt".to_string(), ZipSource::Path(&file)),
             ("A.TXT".to_string(), ZipSource::Path(&file)),
@@ -1517,8 +1507,7 @@ mod tests {
         for f in &manifest.files {
             assert_eq!(f.size, (STREAM_CHUNK * 2 + 7) as u64);
         }
-        let dir =
-            std::env::temp_dir().join(format!("rustpacker-large-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("rustpacker-large-{}", std::process::id()));
         let extracted = extract_payload(&exe, &dir).expect("extract");
         assert_eq!(extracted.len(), 5);
         for i in 0..5u8 {
@@ -1534,8 +1523,8 @@ mod tests {
         // Flip a byte inside the compressed payload: the footer hash fails
         // first, so build the corruption *inside* the archive instead by
         // packing then rewriting one entry's data through the reader.
-        let exe = pack_files(&stub(), vec![("a.txt".into(), b"hello".to_vec())], "{}")
-            .expect("pack");
+        let exe =
+            pack_files(&stub(), vec![("a.txt".into(), b"hello".to_vec())], "{}").expect("pack");
         assert!(read_manifest(&exe).is_ok());
 
         // A truncated exe must be reported, not panic.
@@ -1545,8 +1534,8 @@ mod tests {
 
     #[test]
     fn archive_reader_rejects_a_lying_short_footer() {
-        let exe = pack_files(&stub(), vec![("a.txt".into(), b"hello".to_vec())], "{}")
-            .expect("pack");
+        let exe =
+            pack_files(&stub(), vec![("a.txt".into(), b"hello".to_vec())], "{}").expect("pack");
         // Rewrite archive_len to be smaller than reality; `find_payload`
         // still passes (the payload hash is unchanged) but the reader must
         // notice the archive holds more bytes than declared.
