@@ -55,11 +55,13 @@ mod win {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetMessageW,
         GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, IsDialogMessageW, LoadCursorW,
-        LoadIconW, MoveWindow, PostQuitMessage, RegisterClassW, SendMessageW, SetWindowLongPtrW,
+        LoadIconW, MessageBoxW, MoveWindow, PostQuitMessage, RegisterClassW, SendMessageW,
+        SetWindowLongPtrW,
         SetWindowTextW, ShowWindow, TranslateMessage, BM_GETCHECK, BM_SETCHECK, BN_CLICKED,
         BS_AUTOCHECKBOX, BS_PUSHBUTTON, CBN_SELCHANGE, CBS_DROPDOWNLIST, CB_ADDSTRING,
         CB_GETCURSEL, CB_SETCURSEL, CREATESTRUCTW, CW_USEDEFAULT, EN_CHANGE, ES_AUTOHSCROLL,
-        ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY, GWLP_USERDATA, HMENU, IDC_ARROW, MINMAXINFO,
+        ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY, GWLP_USERDATA, HMENU, IDC_ARROW, MB_ICONERROR,
+        MB_OK, MINMAXINFO,
         MSG, SW_HIDE, SW_SHOW, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLOREDIT,
         WM_CTLCOLORSTATIC, WM_DESTROY, WM_GETMINMAXINFO, WM_NCCREATE, WM_SETFONT, WM_SIZE,
         WNDCLASSW, WS_BORDER, WS_CHILD, WS_CLIPCHILDREN, WS_OVERLAPPEDWINDOW, WS_TABSTOP,
@@ -127,6 +129,20 @@ mod win {
 
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    /// Startup failures happen before there is a window to report them in,
+    /// so they go in a message box (L6: exiting silently left the user with
+    /// a double-click that appeared to do nothing).
+    unsafe fn show_startup_error(message: &str) {
+        let text = wide(message);
+        let caption = wide("RustPacker Builder Studio");
+        let _ = MessageBoxW(
+            std::ptr::null_mut(),
+            text.as_ptr(),
+            caption.as_ptr(),
+            MB_OK | MB_ICONERROR,
+        );
     }
 
     fn colorref((r, g, b): (u8, u8, u8)) -> COLORREF {
@@ -449,7 +465,12 @@ mod win {
                 lpszMenuName: std::ptr::null(),
                 lpszClassName: class_name.as_ptr(),
             };
-            let _ = RegisterClassW(&wc);
+            if RegisterClassW(&wc) == 0 {
+                show_startup_error(
+                    "Could not register the window class, so the Builder Studio cannot start.",
+                );
+                return;
+            }
 
             let mut app = Box::new(App::new(hinstance, &theme));
             app.brush_bg = brush_bg;
@@ -472,6 +493,9 @@ mod win {
             );
             if hwnd.is_null() {
                 let _ = Box::from_raw(app_ptr);
+                show_startup_error(
+                    "Could not create the main window, so the Builder Studio cannot start.",
+                );
                 return;
             }
             let _ = ShowWindow(hwnd, SW_SHOW);

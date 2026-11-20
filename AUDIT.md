@@ -209,7 +209,7 @@ Per-machine scope writes to `%ProgramFiles%` and `HKLM` with no admin check, no 
 
 ### M7. No confirmation before uninstall or cancel; no logging
 
-**Status: PARTIAL.** Uninstall asks for confirmation first (skipped under `--silent`). The wizard cancel confirmation and an install log are still missing.
+**Status: FIXED (code only).** Uninstall and wizard cancel both confirm first (skipped under `--silent`), and the install writes an `install.log` beside the journal: a plain header/footer around one timestamped line per step, rotated to `.1` past 256 KiB, best-effort so a logging failure can never fail the install. CI compiles and unit-tests the log; whether a field failure leaves a readable file on a real machine is part of the Windows verification that is still outstanding.
 `run_uninstall` deletes everything immediately (only a result message box afterwards). `Cancel` destroys the wizard with no confirmation even after a successful install. There is no log file — field failures are undebuggable (message-box text only). *Fix:* `MB_YESNO`/`MB_OKCANCEL` confirmations (respecting `--silent`), plus an optional install log (`install.log`) recording steps, journal path, and errors.
 
 ### M8. Keyboard accessibility: Enter/Space cannot advance the wizard
@@ -237,7 +237,7 @@ Per-machine scope writes to `%ProgramFiles%` and `HKLM` with no admin check, no 
 
 ### M11. Install-directory page accepts any path
 
-**Status: PARTIAL.** Emptiness is still the only check on the folder page and there is still no Browse button; `create_dir_all` failures now surface as install errors instead of being swallowed.
+**Status: FIXED (code only).** The folder page validates through core `validate_install_dir` (absolute, no device paths, no drive root, no `.`/`..` components, per-component and total length limits, no reserved device stems, no trailing dot/whitespace components, and never a Windows system root) and offers a Browse button backed by `IFileOpenDialog`; cancelling the picker keeps the typed path. CI compiles the dialog code and unit-tests the validator, but the picker itself needs a Windows host to exercise.
 Only emptiness is checked. `C:\Windows\System32`, relative paths, UNC paths, and paths with invalid characters are accepted; `create_dir_all` then either fails mid-install or writes into a system location. There is no Browse button. *Fix:* validate (absolute, writable, not a Windows system dir, length limits), add Browse, and warn when the target is outside the default root.
 
 ### M12. CLI argument-parser quirks
@@ -247,7 +247,7 @@ Only emptiness is checked. `C:\Windows\System32`, relative paths, UNC paths, and
 
 ### M13. Three divergent filename sanitisers
 
-**Status: PARTIAL.** CLI and GUI both use core `safe_file_name` (reserved names, trimmed dots/spaces, length-bounded); the stub's `sanitize_folder` still differs because it names a folder rather than a file.
+**Status: FIXED (verified in CI).** One core `safe_file_name` now names folders, shortcuts and output files on every surface — the stub's `sanitize_folder` delegates to it — replacing forbidden/control characters, trimming dots and whitespace from both ends, `_`-prefixing reserved device stems, and bounding the result to 120 characters.
 CLI `safe_file_name` (`-` replacement, trims dots/spaces), stub `sanitize_folder` (`_` replacement, trims trailing dots), GUI `sanitize_filename` (`_` replacement, allows space/dot/dash/underscore). Same app name → different folder vs. filename spellings; none handles reserved device names (`CON`, `NUL`…) or length limits. *Fix:* one core function, used everywhere, with reserved-name + length handling.
 
 ### M14. CLI and GUI validation/build behaviour diverges
@@ -295,7 +295,7 @@ Both binaries now embed a manifest, `VS_VERSION_INFO` and an icon.
 | L3 | Duplicate/case-colliding payload paths not detected (see M3). | `payload.rs: pack_files/extract_payload` | FIXED — duplicates rejected at pack time |
 | L4 | `pack` leaves partial outputs (Setup without sums, etc.) when a later write fails. No cleanup/transaction. | `cli: cmd_pack` | OPEN |
 | L5 | Stub `get_text` truncates at 2,048 chars (long install paths silently cut); GUI file dialog caps at 1,024 WCHARs; magic numbers for font params (`CreateFontW(-16,0,0,0,400,0,0,0,1,0,0,5,49,…)`) and window styles instead of named constants. | `stub: get_text, run_wizard`, `gui: file_dialog` | OPEN |
-| L6 | GUI: preview checkboxes re-seed (losing user toggles) whenever the finish *model* changes; elevated-surface colour hardcoded instead of from theme; `RegisterClassW` result ignored; window-creation failure exits silently with no message. | `gui: refresh_preview, color_control, run` | OPEN |
+| L6 | GUI: preview checkboxes re-seed (losing user toggles) whenever the finish *model* changes; elevated-surface colour hardcoded instead of from theme; `RegisterClassW` result ignored; window-creation failure exits silently with no message. | `gui: refresh_preview, color_control, run` | FIXED (code only) — checkbox state and the re-seed rule moved to core `FinishSelection` (an unseen option carries the project default, a seen one keeps the user's choice, hide/show is lossless); surfaces/colours come from the theme; class-registration and window-creation failures now show a message box instead of exiting silently |
 | L7 | CLI `version` command undocumented in `HELP`; `schema --json` prints TOML. | `cli: dispatch, cmd_schema` | FIXED — `version` and `schema --json` documented |
 | L8 | `.gitignore` doesn't cover `*.exe`/`*.zip`/`SHA256SUMS.txt`/`rustpacker.toml` in repo root (default `--out-dir` is `.`); no `rustfmt.toml`/`clippy.toml`/`.editorconfig`; no `CHANGELOG`/`SECURITY.md`; single-commit history, no tags/releases. | repo root | OPEN |
 | L9 | CI: no `cargo clippy`, no `cargo fmt --check`, no Linux/macOS `cargo check` (despite "host builds pass" claims), no `--locked`, no caching, unpinned `stable` toolchain, no artifact upload, no `cargo audit`/`cargo deny`. | `.github/workflows/ci.yml` | PARTIAL — Linux fmt/clippy/test + Windows clippy/test/release/smoke added; no `--locked`, cache, pinned toolchain or audit |
@@ -305,8 +305,8 @@ Both binaries now embed a manifest, `VS_VERSION_INFO` and an icon.
 | L13 | `examples/demo/payload/DemoApp.exe` is a 20-byte text placeholder (`MZ-demo-placeholder`), not a PE. Packing the demo with a real stub yields a Setup that installs a text file as the "exe". Docs should say so explicitly. | `examples/demo/` | OPEN |
 | L14 | Typewriter reveals by `char`, splitting grapheme clusters/emoji ZWJ sequences; `reset()` cannot change the interval. Cosmetic only. | `typewriter.rs` | OPEN |
 | L15 | `InstallJournal::save` temp name via `with_extension("json.tmp")` turns `install.journal.json` into `install.journal.tmp` — works, but surprising; two concurrent saves would race. | `journal.rs: save` | FIXED — fsync + temp cleanup + schema-version check (`.json.tmp` naming remains) |
-| L16 | Stub copies the **entire** `Setup.exe` (payload included) to `Uninstall.exe`, duplicating the payload on disk. Harmless but wasteful; a payload-free uninstaller stub would halve the footprint. | `stub: perform_install` | OPEN |
-| L17 | `FinishScreenModel`/`TrayConfig` logic is well-tested, but `launch_args`/`login_command` edge cases (empty `tray_arg` with tray enabled is validated, but whitespace-only `startup_tray_arg` fallback uses `trim().is_empty()` while `login_command` embeds the untrimmed string) deserve a few more tests. | `schema.rs` | PARTIAL — `login_command` escaping covered by validation |
+| L16 | Stub copies the **entire** `Setup.exe` (payload included) to `Uninstall.exe`, duplicating the payload on disk. Harmless but wasteful; a payload-free uninstaller stub would halve the footprint. | `stub: perform_install` | FIXED (code only) — the uninstaller is written through core `strip_payload`, so it carries no payload; if stripping ever fails the full copy is still written, because an oversized uninstaller beats a missing one |
+| L17 | `FinishScreenModel`/`TrayConfig` logic is well-tested, but `launch_args`/`login_command` edge cases (empty `tray_arg` with tray enabled is validated, but whitespace-only `startup_tray_arg` fallback uses `trim().is_empty()` while `login_command` embeds the untrimmed string) deserve a few more tests. | `schema.rs` | FIXED (verified in CI) — `login_command_edges`/`launch_args_edges` pin the fallback (whitespace-only override falls back to `tray_arg`), trimming, quote-leading fragment rejection, and unsafe exe paths |
 ---
 
 ## 6. Per-crate notes
@@ -360,7 +360,7 @@ README is accurate and unusually honest (verified vs. unverified, unapplied feat
 
 ### Status of this roadmap
 
-P0 items 1–9 are implemented in this branch (H1–H10), and the CI half of item 10 is in place (fmt, clippy, tests, Windows release + smoke test). The **human** half of item 10 — running the wizard and GUI on a real Windows 11 host — is still outstanding, and it is the one thing no amount of CI here can substitute for. P1 is nearly complete too: M5 (streaming), M7 (cancel confirmation + logging), M9 (worker-thread install) and M18 (manifest/version/icon) are all done and CI-verified. M11's folder Browse and the L-items remain, as does the human half of item 10.
+P0 items 1–9 are implemented in this branch (H1–H10), and the CI half of item 10 is in place (fmt, clippy, tests, Windows release + smoke test). The **human** half of item 10 — running the wizard and GUI on a real Windows 11 host — is still outstanding, and it is the one thing no amount of CI here can substitute for. P1 is complete in code apart from M14's last piece (the GUI still has no portable-ZIP option): M5 (streaming), M7 (cancel confirmation + logging), M9 (worker-thread install), M11 (folder validation + Browse), M13 (one shared filename sanitiser) and M18 (manifest/version/icon) are all done and CI-verified, as are the L-items this audit raised. What remains is that, and the human half of item 10.
 
 ### P0 — before any end-user release
 1. **H1** Confine uninstall deletions to `install_dir`; validate journal on load.
@@ -375,7 +375,7 @@ P0 items 1–9 are implemented in this branch (H1–H10), and the CI half of ite
 10. **Windows verification:** run stub + GUI on a real Windows 11 host (wizard, typewriter, shortcut, Run entry, ARP, install→uninstall round-trip, per-machine with elevation). Record results in README.
 
 ### P1 — next slice
-M1 (deny unknown fields), M2 (full validation), M4 (pack-time checks), M5 (streaming / single decode), M6 (elevation), M7 (confirmations + log), M8 (keyboard nav), M9 (worker-thread install), M10/M11 (real license page, dir validation + Browse), M13/M14 (shared helpers, CLI/GUI parity), M15–M18 (journal durability, association restore, tray-arg consistency, manifest/version/icon). Of these, M9 and M18 are now implemented and CI-verified; M11's Browse button is the main remaining P1 gap.
+M1 (deny unknown fields), M2 (full validation), M4 (pack-time checks), M5 (streaming / single decode), M6 (elevation), M7 (confirmations + log), M8 (keyboard nav), M9 (worker-thread install), M10/M11 (real license page, dir validation + Browse), M13/M14 (shared helpers, CLI/GUI parity), M15–M18 (journal durability, association restore, tray-arg consistency, manifest/version/icon). All of these are now implemented and CI-verified except M14's GUI portable-ZIP option; the runtime behaviour of the Windows-only surfaces (wizard pages, Browse dialog, log file on a real install) still awaits the Windows 11 verification in P0 item 10.
 
 ### P2 — polish
 L1–L17, CI hardening (clippy/fmt/Linux/`--locked`/cache/artifacts/audit/Dependabot), `CHANGELOG`/`SECURITY.md`/`docs/payload-format.md`, `.gitignore` expansion, test-gap coverage (L12), demo placeholder labelling.
