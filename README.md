@@ -59,11 +59,18 @@ for `x86_64-pc-windows-gnu` (PE32+ x86-64; stub and GUI are GUI-subsystem
 binaries), and an end-to-end pack → verify → extract run using the real
 Windows stub binary, with `SHA256SUMS.txt` checked by an external tool.
 
-Unverified: all Windows 11 runtime behaviour (wizard rendering,
+Verified in CI (`.github/workflows/ci.yml`): `cargo fmt --check`,
+`cargo clippy -D warnings` and the full test suite on Linux; on
+`windows-latest`, clippy for `x86_64-pc-windows-msvc` (all targets), the
+test suite, the release `crt-static` build of all four binaries, and a
+smoke run of the released CLI (`init` then `validate`).
+
+Unverified: all Windows 11 **runtime** behaviour (wizard rendering,
 typewriter feel, shortcut creation, registry writes, install/uninstall
-round-trip) — there is no Windows host in the build environment. The
-release build for the MSVC target with `crt-static` runs in CI
-(`.github/workflows/ci.yml`, windows-latest).
+round-trip) — there is no Windows host in the build environment, and CI
+compiles and lints the stub and GUI but never runs them. Treat the
+installer itself as inspection-verified only until it has been run on a
+real machine.
 
 Applied by the installer stub: project-file `[[shortcuts]]` (Desktop and
 Start Menu), custom `[[registry]]` values (previous values are recorded
