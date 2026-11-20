@@ -26,8 +26,10 @@ or WebView2 runtime.
 - **Payload format** — files are packed into a zstd-compressed archive
   appended after the stub PE, closed by a fixed footer carrying the
   `RUSTPACKER_OVL01` marker, payload offset/length, and SHA-256 hashes
-  (whole payload and per file). Extraction rejects corrupt payloads and
-  any path that would escape the install directory.
+  (whole payload and per file). Packing and extraction both **stream** in
+  64 KiB chunks: no source file, no decompressed archive, and no extracted
+  file is ever held in memory whole. Extraction rejects corrupt payloads
+  and any path that would escape the install directory.
 - **Installs** — Per-User, Per-Machine, or Dual-Mode scope (dual-mode
   resolves to per-machine when elevated, per-user otherwise); a
   transactional journal (`install.journal.json`) powers clean rollback
