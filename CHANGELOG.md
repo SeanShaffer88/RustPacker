@@ -6,7 +6,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+
+- **Builder Studio redesign.** The Studio now uses the classic
+  installer-authoring shell: a File/Build/View/Help menu bar and toolbar,
+  a grouped, collapsible section navigation (Project, Installation,
+  Requirements, Wizard, Build), one editor page per project section, the
+  live wizard preview pinned on the right, and a status bar. Every project
+  field is now editable in the Studio — app description, install directory,
+  license file, minimum Windows build, PATH scope, finish-page defaults,
+  the full terminal palette, and typewriter speed — with add/remove/edit
+  list editors for shortcuts, registry entries, file associations,
+  prerequisites, and running-process checks. The dark One Dark Pro theme
+  and the build/validate/preview behaviour are unchanged. Like the rest of
+  the Windows surface, the new shell awaits the Windows 11 runtime pass in
+  `docs/windows-verification.md`.
 
 ## [0.2.0] - 2026-11-20
 
