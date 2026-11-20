@@ -28,11 +28,16 @@ or WebView2 runtime.
   `RUSTPACKER_OVL01` marker, payload offset/length, and SHA-256 hashes
   (whole payload and per file). Extraction rejects corrupt payloads and
   any path that would escape the install directory.
-- **Installs** — Per-User, Per-Machine, or Dual-Mode scope; a
+- **Installs** — Per-User, Per-Machine, or Dual-Mode scope (dual-mode
+  resolves to per-machine when elevated, per-user otherwise); a
   transactional journal (`install.journal.json`) powers clean rollback
   and the generated `Uninstall.exe`, which is registered in Windows
-  Apps & Features. The installer applies the payload, the finish-page
-  desktop shortcut, the Apps & Features entry, and the at-login entry.
+  Apps & Features. The installer applies the payload, project
+  `[[shortcuts]]`, `[[registry]]` values, `[[file_associations]]`, PATH
+  entries, the finish-page desktop shortcut, the Apps & Features entry,
+  and the at-login entry. Prerequisite and running-process checks run
+  before anything is written, and a failed install rolls back every
+  change it made.
 
 ## Finish page options
 
@@ -54,17 +59,45 @@ for `x86_64-pc-windows-gnu` (PE32+ x86-64; stub and GUI are GUI-subsystem
 binaries), and an end-to-end pack → verify → extract run using the real
 Windows stub binary, with `SHA256SUMS.txt` checked by an external tool.
 
-Unverified: all Windows 11 runtime behaviour (wizard rendering,
-typewriter feel, shortcut creation, registry writes, install/uninstall
-round-trip) — there is no Windows host in the build environment. The
-release build for the MSVC target with `crt-static` runs in CI
-(`.github/workflows/ci.yml`, windows-latest).
+Verified in CI (`.github/workflows/ci.yml`): `cargo fmt --check`,
+`cargo clippy -D warnings` and the full test suite on Linux; on
+`windows-latest`, clippy for `x86_64-pc-windows-msvc` (all targets), the
+test suite, the release `crt-static` build of all four binaries, and a
+smoke run of the released CLI (`init` then `validate`).
 
-Not yet applied by the installer stub (schema and journal support exist,
-and the uninstaller already reverses recorded entries of these kinds):
-project-file `[[shortcuts]]` beyond the finish-page desktop shortcut,
-custom `[[registry]]` values, `[[file_associations]]`, PATH entries, and
-the prerequisite / running-process checks. These are the next slice.
+Unverified: all Windows 11 **runtime** behaviour (wizard rendering,
+typewriter feel, shortcut creation, registry writes, install/uninstall
+round-trip) — there is no Windows host in the build environment, and CI
+compiles and lints the stub and GUI but never runs them. Treat the
+installer itself as inspection-verified only until it has been run on a
+real machine.
+
+Applied by the installer stub: project-file `[[shortcuts]]` (Desktop and
+Start Menu), custom `[[registry]]` values (previous values are recorded
+and restored on uninstall), `[[file_associations]]` (`Software\Classes`
+prog-id + open command, skipped on uninstall when the keys pre-existed),
+PATH entries (`path_scope`), prerequisite probes (registry and file), and
+running-process checks. Every one of these is journaled and reversed on
+uninstall or rollback.
+
+Install safety, as of this version:
+
+- A failed install rolls back every journaled change (files, folders,
+  registry values, shortcuts, PATH) instead of leaving a half-installed app.
+- Prerequisite and running-process checks run before anything is written.
+- A packed installer whose payload is corrupt, whose config is invalid,
+  or whose config fails validation refuses to run with an explanatory
+  dialog; it no longer falls back to demo mode. Demo mode applies only to
+  a stub with no payload at all.
+- Per-machine installs offer a UAC re-launch; `dual-mode` projects resolve
+  to per-machine when elevated and per-user otherwise.
+- Uninstall refuses a journal whose paths lie outside the recorded install
+  folder, and the running `Uninstall.exe` is scheduled for deletion on the
+  next reboot.
+
+Still open: the wizard pages themselves (license text rendering, progress
+detail) are minimal, and no automated test exercises Win32 APIs — the
+Windows runtime behaviour above remains verified by inspection only.
 
 ## Project file
 
@@ -81,7 +114,9 @@ A worked example lives in `examples/demo/`.
 ## Build
 
 ```text
-cargo test
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 cargo build --release --target x86_64-pc-windows-msvc
 ```
 

@@ -14,14 +14,15 @@ pub use journal::{
     InstallJournal, JournalAction, JournalEntry, JOURNAL_FILE_NAME, UNINSTALLER_FILE_NAME,
 };
 pub use payload::{
-    extract_payload, find_payload, pack_directory, pack_files, read_manifest, sha256_hex,
-    sha256sums_txt, verify_payload, write_stored_zip, FileEntry, PackedInfo, PayloadManifest,
-    CONFIG_ENTRY_NAME, OVERLAY_MAGIC,
+    extract_payload, find_payload, normalized_rel_str, pack_directory, pack_files, read_manifest,
+    sanitise_rel_path, sha256_hex, sha256sums_txt, verify_payload, write_stored_zip, FileEntry,
+    PackedInfo, PayloadManifest, CONFIG_ENTRY_NAME, FOOTER_LEN, MAX_ARCHIVE_LEN, MAX_FILE_COUNT,
+    OVERLAY_MAGIC,
 };
 pub use schema::{
-    AppInfo, FileAssociation, FinishConfig, FinishScreenModel, InstallConfig, InstallScope,
-    Prerequisite, ProcessCheck, ProjectConfig, RegistryEntry, ShortcutConfig, TerminalTheme,
-    TrayConfig, CURRENT_SCHEMA_VERSION,
+    is_bare_filename, safe_file_name, AppInfo, FileAssociation, FinishConfig, FinishScreenModel,
+    InstallConfig, InstallScope, Prerequisite, ProcessCheck, ProjectConfig, RegistryEntry,
+    ShortcutConfig, TerminalTheme, TrayConfig, CURRENT_SCHEMA_VERSION,
 };
 pub use typewriter::{Typewriter, DEFAULT_INTERVAL_MS};
 

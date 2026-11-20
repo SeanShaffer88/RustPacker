@@ -10,7 +10,7 @@ pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 
 /// One Dark Pro terminal palette (zhuangtongfa.Material-theme).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct TerminalTheme {
     pub background_hex: String,
     pub surface_hex: String,
@@ -101,12 +101,48 @@ pub enum InstallScope {
     #[default]
     PerUser,
     PerMachine,
+    /// Request elevation and install for all users when the process can
+    /// elevate; otherwise fall back to a per-user install. The
+    /// *effective* scope is resolved by [`InstallScope::resolve`] — the
+    /// stub and the GUI never treat `DualMode` as "per-user but with a
+    /// different label".
     DualMode,
+}
+
+impl InstallScope {
+    /// The concrete scope an install actually performs.
+    ///
+    /// `elevated` says whether the installer is running with machine-wide
+    /// rights (admin). DualMode becomes per-machine only when elevated.
+    pub fn resolve(self, elevated: bool) -> InstallScope {
+        match self {
+            InstallScope::DualMode => {
+                if elevated {
+                    InstallScope::PerMachine
+                } else {
+                    InstallScope::PerUser
+                }
+            }
+            other => other,
+        }
+    }
+
+    pub fn is_machine_wide(self) -> bool {
+        matches!(self, InstallScope::PerMachine)
+    }
+
+    /// Human label for UI and JSON output (never "DualMode").
+    pub fn label(self) -> &'static str {
+        match self {
+            InstallScope::PerUser | InstallScope::DualMode => "per-user",
+            InstallScope::PerMachine => "per-machine",
+        }
+    }
 }
 
 /// Tray behaviour of the installed application.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct TrayConfig {
     /// True when the installed app can minimise to the system tray.
     pub supports_tray: bool,
@@ -142,7 +178,7 @@ impl TrayConfig {
 /// Which optional checkboxes the finish page offers. An option is always
 /// offered unless explicitly hidden here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct FinishConfig {
     pub hide_desktop_shortcut: bool,
     pub hide_launch_after_setup: bool,
@@ -196,6 +232,12 @@ impl FinishScreenModel {
     }
 
     /// Arguments for launching the app after setup.
+    ///
+    /// `tray_arg` is a command-line *fragment*: it is split on
+    /// whitespace so `"--tray --at-login"` becomes two arguments. This
+    /// matches how [`login_command`] embeds the same string in the
+    /// `Run` value (where it is also a fragment, not a single quoted
+    /// argument).
     pub fn launch_args(
         &self,
         cfg: &ProjectConfig,
@@ -206,14 +248,19 @@ impl FinishScreenModel {
             return Vec::new();
         }
         if start_in_tray && self.show_launch_tray {
-            vec![cfg.tray.tray_arg.clone()]
+            cfg.tray
+                .tray_arg
+                .split_whitespace()
+                .map(|s| s.to_string())
+                .collect()
         } else {
             Vec::new()
         }
     }
 
     /// The `HKCU\...\Run` value data for launch-at-login, or `None` when
-    /// the option is not visible / not chosen.
+    /// the option is not visible / not chosen. Returns `None` when
+    /// `exe_path` cannot be safely quoted (contains `"` or controls).
     pub fn login_command(
         &self,
         cfg: &ProjectConfig,
@@ -224,11 +271,16 @@ impl FinishScreenModel {
         if !at_login || !self.show_launch_at_login {
             return None;
         }
+        if exe_path.contains('"') || exe_path.chars().any(|c| (c as u32) < 0x20) {
+            return None;
+        }
         if start_in_tray && self.show_login_tray {
-            Some(format!(
-                "\"{exe_path}\" {}",
-                cfg.tray.effective_startup_tray_arg()
-            ))
+            let arg = cfg.tray.effective_startup_tray_arg().trim();
+            if arg.is_empty() {
+                Some(format!("\"{exe_path}\""))
+            } else {
+                Some(format!("\"{exe_path}\" {arg}"))
+            }
         } else {
             Some(format!("\"{exe_path}\""))
         }
@@ -236,7 +288,7 @@ impl FinishScreenModel {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct AppInfo {
     pub name: String,
     pub version: String,
@@ -262,7 +314,7 @@ impl Default for AppInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct InstallConfig {
     pub scope: InstallScope,
     /// Install folder token or path. Tokens: `{per-user-programs}`,
@@ -275,6 +327,12 @@ pub struct InstallConfig {
     pub require_admin: bool,
     /// Minimum Windows build (Windows 11 = 22000). 0 disables the check.
     pub min_windows_build: u32,
+    /// License text shown on the license page. Filled in by the packer
+    /// from `license_file` so the wizard can display the real agreement
+    /// instead of a path. Never written back to the project file
+    /// (`skip_serializing`) — the file is the source of truth on disk.
+    #[serde(default, skip_serializing)]
+    pub license_text: String,
 }
 
 impl Default for InstallConfig {
@@ -286,11 +344,13 @@ impl Default for InstallConfig {
             license_file: String::new(),
             require_admin: false,
             min_windows_build: 22000,
+            license_text: String::new(),
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ShortcutConfig {
     pub name: String,
     /// `desktop`, `start-menu`, or a folder path under the install dir.
@@ -300,7 +360,18 @@ pub struct ShortcutConfig {
     pub arguments: String,
 }
 
+impl ShortcutConfig {
+    /// Whether the location is one the installer can create today.
+    pub fn location_is_supported(&self) -> bool {
+        matches!(
+            self.location.trim().to_ascii_lowercase().as_str(),
+            "desktop" | "start-menu" | "startmenu"
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RegistryEntry {
     /// `HKCU` or `HKLM`.
     pub root: String,
@@ -310,6 +381,7 @@ pub struct RegistryEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FileAssociation {
     pub extension: String,
     pub prog_id: String,
@@ -319,6 +391,7 @@ pub struct FileAssociation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Prerequisite {
     pub name: String,
     /// Registry value that must exist, e.g. `HKLM\SOFTWARE\...\Install`.
@@ -331,6 +404,7 @@ pub struct Prerequisite {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProcessCheck {
     /// Process image name that must not be running, e.g. `MyApp.exe`.
     pub process_name: String,
@@ -338,7 +412,7 @@ pub struct ProcessCheck {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ProjectConfig {
     pub schema_version: u32,
     pub app: AppInfo,
@@ -376,12 +450,115 @@ impl Default for ProjectConfig {
     }
 }
 
+/// True when `name` is a single bare file name (no directory
+/// separators, no drive/ADS `:` , no `..`, no reserved device name,
+/// no trailing dot/space, no controls). Used to validate
+/// `app.main_exe`, `FileAssociation.open_with`, and process names so
+/// `install_dir.join(name)` can never escape the install directory.
+pub fn is_bare_filename(name: &str) -> bool {
+    if name.is_empty() || name == "." || name == ".." {
+        return false;
+    }
+    if name.contains('/') || name.contains('\\') || name.contains(':') {
+        return false;
+    }
+    if name.chars().any(|c| (c as u32) < 0x20 || c as u32 == 0x7f) {
+        return false;
+    }
+    if name
+        .chars()
+        .any(|c| matches!(c, '<' | '>' | '"' | '|' | '?' | '*'))
+    {
+        return false;
+    }
+    if name.ends_with('.') || name.ends_with(' ') {
+        return false;
+    }
+    let stem = name.split('.').next().unwrap_or(name);
+    !is_reserved_device_name(stem)
+}
+
+/// Windows reserved device names (`CON`, `NUL`, `COM1`, …), matched
+/// case-insensitively on the stem before the first dot.
+fn is_reserved_device_name(stem: &str) -> bool {
+    matches!(
+        stem.to_ascii_uppercase().as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    )
+}
+
+/// Make a file-name component safe for Windows: replace characters
+/// Windows forbids in file names (and control characters) with `-`,
+/// trim leading/trailing dots and spaces, and fall back to `"App"`
+/// when nothing usable remains. Reserved device names get a `_`
+/// prefix. This is the single implementation shared by the CLI and
+/// the GUI so both produce identical output file names.
+pub fn safe_file_name(raw: &str) -> String {
+    let mut out = String::new();
+    for c in raw.chars() {
+        if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || (c as u32) < 0x20 {
+            out.push('-');
+        } else {
+            out.push(c);
+        }
+    }
+    let trimmed = out.trim_matches(|c| c == '.' || c == ' ');
+    if trimmed.is_empty() {
+        return "App".to_string();
+    }
+    let stem = trimmed.split('.').next().unwrap_or(trimmed);
+    if is_reserved_device_name(stem) {
+        format!("_{trimmed}")
+    } else {
+        trimmed.to_string()
+    }
+}
+
 impl ProjectConfig {
     pub fn from_toml(text: &str) -> Result<Self, String> {
         let mut cfg: ProjectConfig =
             toml::from_str(text).map_err(|e| format!("invalid project file: {e}"))?;
         cfg.migrate()?;
+        cfg.normalise()?;
         Ok(cfg)
+    }
+
+    /// Trim user-facing strings and reject the few values that are
+    /// unsafe regardless of context (`app_id` is used as a directory
+    /// and registry-name component). Errors here are returned as parse
+    /// errors, so a JSON project cannot smuggle what TOML validation
+    /// would reject.
+    pub fn normalise(&mut self) -> Result<(), String> {
+        self.app.name = self.app.name.trim().to_string();
+        self.app.version = self.app.version.trim().to_string();
+        self.app.main_exe = self.app.main_exe.trim().to_string();
+        self.app.app_id = self.app.app_id.trim().to_string();
+        self.install.source_dir = self.install.source_dir.trim().to_string();
+        self.install.default_dir = self.install.default_dir.trim().to_string();
+        self.tray.tray_arg = self.tray.tray_arg.trim().to_string();
+        self.tray.startup_tray_arg = self.tray.startup_tray_arg.trim().to_string();
+        Ok(())
     }
 
     pub fn to_toml(&self) -> Result<String, String> {
@@ -392,7 +569,20 @@ impl ProjectConfig {
         let mut cfg: ProjectConfig =
             serde_json::from_str(text).map_err(|e| format!("invalid project JSON: {e}"))?;
         cfg.migrate()?;
+        cfg.normalise()?;
         Ok(cfg)
+    }
+
+    /// Parse a project file, reporting **every** validation problem at
+    /// once (parse errors first) instead of stopping at the first one.
+    pub fn from_toml_checked(text: &str) -> Result<Self, Vec<String>> {
+        let cfg = Self::from_toml(text).map_err(|e| vec![e])?;
+        let errors = cfg.validate();
+        if errors.is_empty() {
+            Ok(cfg)
+        } else {
+            Err(errors)
+        }
     }
 
     pub fn to_json(&self) -> Result<String, String> {
@@ -421,6 +611,13 @@ impl ProjectConfig {
         }
         if self.app.version.trim().is_empty() {
             errs.push("app.version must not be empty".into());
+        } else if self.app.version.chars().any(|c| {
+            matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || (c as u32) < 0x20
+        }) {
+            errs.push(
+                "app.version must not contain path separators or Windows-forbidden characters"
+                    .into(),
+            );
         }
         if self.app.app_id.trim().is_empty()
             || !self
@@ -435,9 +632,22 @@ impl ProjectConfig {
         }
         if self.app.main_exe.trim().is_empty() {
             errs.push("app.main_exe must not be empty".into());
+        } else if !is_bare_filename(self.app.main_exe.trim()) {
+            errs.push(
+                "app.main_exe must be a bare file name (no directories, drive, or '..'), e.g. 'MyApp.exe'"
+                    .into(),
+            );
         }
         if self.install.source_dir.trim().is_empty() {
             errs.push("install.source_dir must not be empty".into());
+        }
+        if self.install.default_dir.trim().is_empty() {
+            errs.push("install.default_dir must not be empty".into());
+        }
+        if self.install.min_windows_build > 100_000 {
+            errs.push(
+                "install.min_windows_build is implausibly large (Windows 11 is 22000)".into(),
+            );
         }
         if self.typewriter_interval_ms == 0 || self.typewriter_interval_ms > 1000 {
             errs.push("typewriter_interval_ms must be between 1 and 1000".into());
@@ -448,18 +658,125 @@ impl ProjectConfig {
         if !self.path_scope.is_empty() && self.path_scope != "user" && self.path_scope != "machine"
         {
             errs.push("path_scope must be empty, \"user\", or \"machine\"".into());
+        } else if self.path_scope == "machine"
+            && matches!(self.install.scope, InstallScope::PerUser)
+        {
+            // A per-user install cannot write the machine PATH; failing
+            // here (instead of mid-install) keeps the settings honest.
+            errs.push(
+                "path_scope = \"machine\" needs install.scope = \"per-machine\" (or \"dual-mode\")"
+                    .into(),
+            );
         }
-        for a in &self.file_associations {
-            if !a.extension.starts_with('.') || a.extension.len() < 2 {
+        for s in &self.shortcuts {
+            if s.name.trim().is_empty() {
+                errs.push("shortcut name must not be empty".into());
+            }
+            if s.location.trim().is_empty() {
+                errs.push(format!("shortcut '{}' location must not be empty", s.name));
+            } else if !s.location_is_supported() {
                 errs.push(format!(
-                    "file association extension must look like '.ext': {}",
-                    a.extension
+                    "shortcut '{}' location must be \"desktop\" or \"start-menu\": {}",
+                    s.name, s.location
+                ));
+            }
+            if s.target.trim().is_empty() {
+                errs.push(format!("shortcut '{}' target must not be empty", s.name));
+            } else if crate::payload::sanitise_rel_path(s.target.trim()).is_err() {
+                errs.push(format!(
+                    "shortcut '{}' target must be a relative path inside the install dir: {}",
+                    s.name, s.target
                 ));
             }
         }
         for r in &self.registry {
             if r.root != "HKCU" && r.root != "HKLM" {
                 errs.push(format!("registry root must be HKCU or HKLM: {}", r.root));
+            }
+            if r.key.trim().is_empty() {
+                errs.push("registry key must not be empty".into());
+            }
+            if r.name.trim().is_empty() {
+                errs.push(format!(
+                    "registry entry for key '{}' has an empty value name",
+                    r.key
+                ));
+            }
+            let machine_capable = matches!(
+                self.install.scope,
+                InstallScope::PerMachine | InstallScope::DualMode
+            ) || self.path_scope.trim().eq_ignore_ascii_case("machine");
+            if r.root == "HKLM" && !machine_capable {
+                errs.push(format!(
+                    "registry entry '{}' targets HKLM, which needs install.scope = \"per-machine\" (or \"dual-mode\")",
+                    r.key
+                ));
+            }
+        }
+        {
+            let mut seen_ext: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for a in &self.file_associations {
+                if !a.extension.starts_with('.') || a.extension.len() < 2 {
+                    errs.push(format!(
+                        "file association extension must look like '.ext': {}",
+                        a.extension
+                    ));
+                } else if !seen_ext.insert(a.extension.to_ascii_lowercase()) {
+                    errs.push(format!(
+                        "duplicate file association extension: {}",
+                        a.extension
+                    ));
+                }
+                if a.prog_id.trim().is_empty() {
+                    errs.push(format!(
+                        "file association '{}' prog_id must not be empty",
+                        a.extension
+                    ));
+                }
+                if a.open_with.trim().is_empty() {
+                    errs.push(format!(
+                        "file association '{}' open_with must not be empty",
+                        a.extension
+                    ));
+                } else if !is_bare_filename(a.open_with.trim()) {
+                    errs.push(format!(
+                        "file association '{}' open_with must be a bare file name: {}",
+                        a.extension, a.open_with
+                    ));
+                }
+            }
+        }
+        for pr in &self.prerequisites {
+            if pr.name.trim().is_empty() {
+                errs.push("prerequisite name must not be empty".into());
+            }
+            if pr.message.trim().is_empty() {
+                errs.push(format!(
+                    "prerequisite '{}' message must not be empty",
+                    pr.name
+                ));
+            }
+            if pr.registry_probe.trim().is_empty() && pr.file_probe.trim().is_empty() {
+                errs.push(format!(
+                    "prerequisite '{}' needs a registry_probe or file_probe (otherwise it always passes)",
+                    pr.name
+                ));
+            }
+        }
+        for pc in &self.process_checks {
+            if pc.process_name.trim().is_empty() {
+                errs.push("process check process_name must not be empty".into());
+            } else if !is_bare_filename(pc.process_name.trim()) {
+                errs.push(format!(
+                    "process check process_name must be a bare file name: {}",
+                    pc.process_name
+                ));
+            }
+            if pc.message.trim().is_empty() {
+                errs.push(format!(
+                    "process check '{}' message must not be empty",
+                    pc.process_name
+                ));
             }
         }
         errs.extend(self.theme.validate());
@@ -575,8 +892,80 @@ mod tests {
 
     #[test]
     fn newer_schema_is_rejected() {
-        let mut cfg = ProjectConfig::default();
-        cfg.schema_version = CURRENT_SCHEMA_VERSION + 1;
+        let mut cfg = ProjectConfig {
+            schema_version: CURRENT_SCHEMA_VERSION + 1,
+            ..Default::default()
+        };
         assert!(cfg.migrate().is_err());
+    }
+
+    #[test]
+    fn unknown_fields_are_rejected() {
+        let err = ProjectConfig::from_toml(
+            "schema_version = 1\n[app]\nname = \"X\"\nsuports_tray = true\n",
+        );
+        assert!(err.is_err(), "typo field must fail to parse: {err:?}");
+        let err = ProjectConfig::from_toml("schema_version = 1\nbogus_key = 1\n");
+        assert!(err.is_err(), "unknown top-level key must fail: {err:?}");
+    }
+
+    #[test]
+    fn bare_filename_and_safe_name_helpers() {
+        assert!(is_bare_filename("MyApp.exe"));
+        assert!(!is_bare_filename("../evil.exe"));
+        assert!(!is_bare_filename("C:\\evil.exe"));
+        assert!(!is_bare_filename("a/b.exe"));
+        assert!(!is_bare_filename("CON"));
+        assert!(!is_bare_filename(""));
+        assert_eq!(safe_file_name("My App"), "My App");
+        assert_eq!(safe_file_name("a/b:c"), "a-b-c");
+        assert_eq!(safe_file_name("..."), "App");
+        assert_eq!(safe_file_name("CON"), "_CON");
+    }
+
+    #[test]
+    fn expanded_validation_catches_bad_sections() {
+        let mut cfg = ProjectConfig::default();
+        cfg.app.main_exe = "../evil.exe".into();
+        assert!(cfg.validate().iter().any(|e| e.contains("main_exe")));
+        let mut cfg = ProjectConfig::default();
+        cfg.app.version = "1.0/evil".into();
+        assert!(cfg.validate().iter().any(|e| e.contains("version")));
+        let mut cfg = ProjectConfig::default();
+        cfg.shortcuts.push(ShortcutConfig {
+            name: String::new(),
+            location: String::new(),
+            target: String::new(),
+            arguments: String::new(),
+        });
+        assert!(!cfg.validate().is_empty());
+        let mut cfg = ProjectConfig::default();
+        cfg.prerequisites.push(Prerequisite {
+            name: "X".into(),
+            registry_probe: String::new(),
+            file_probe: String::new(),
+            message: "m".into(),
+        });
+        assert!(cfg.validate().iter().any(|e| e.contains("always passes")));
+        let mut cfg = ProjectConfig::default();
+        cfg.process_checks.push(ProcessCheck {
+            process_name: "a/b.exe".into(),
+            message: "m".into(),
+        });
+        assert!(cfg.validate().iter().any(|e| e.contains("process_name")));
+    }
+
+    #[test]
+    fn multi_word_tray_arg_splits_for_launch() {
+        let mut cfg = ProjectConfig::default();
+        cfg.tray.supports_tray = true;
+        cfg.tray.tray_arg = "--tray --at-login".into();
+        let m = cfg.finish_model();
+        assert_eq!(
+            m.launch_args(&cfg, true, true),
+            vec!["--tray".to_string(), "--at-login".to_string()]
+        );
+        // Unquotable exe paths must not produce an injectable Run value.
+        assert_eq!(m.login_command(&cfg, "C:\\A\\a\"b.exe", true, true), None);
     }
 }

@@ -7,7 +7,8 @@
 
 use rustpacker_core::payload::{sha256_hex, sha256sums_txt, write_stored_zip};
 use rustpacker_core::{
-    extract_payload, find_payload, pack_directory, read_manifest, PayloadManifest, ProjectConfig,
+    extract_payload, find_payload, pack_directory, read_manifest, safe_file_name, PayloadManifest,
+    ProjectConfig,
 };
 use std::fs;
 use std::io::Write;
@@ -35,10 +36,13 @@ Commands:
       Check the payload checksums and list the packed files.
   list <Setup.exe>
       List the files packed in a Setup.exe.
-  extract <Setup.exe> --out <dir>
-      Extract the packed files to a directory.
+  extract <Setup.exe> --out <dir> [--force]
+      Extract the packed files to a directory (refuses a non-empty
+      directory unless --force is given).
   schema
       Print the example project file (TOML) to standard output.
+  version
+      Print the CLI version.
   help
       Show this help.
 
@@ -85,10 +89,7 @@ impl Fail {
     fn usage(command: Option<&str>, message: &str) -> Self {
         Self {
             code: EXIT_USAGE,
-            command: match command {
-                Some(c) => Some(c.to_string()),
-                None => None,
-            },
+            command: command.map(str::to_string),
             errors: vec![message.to_string()],
         }
     }
@@ -188,8 +189,15 @@ fn real_main() -> i32 {
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let mut json = false;
     let mut args: Vec<String> = Vec::new();
+    // `--json` is a global switch, but everything after a `--` terminator
+    // is positional data and must be passed through untouched.
+    let mut after_terminator = false;
     for arg in raw {
-        if arg == "--json" {
+        if after_terminator {
+            args.push(arg);
+        } else if arg == "--" {
+            after_terminator = true;
+        } else if arg == "--json" {
             json = true;
         } else {
             args.push(arg);
@@ -244,17 +252,27 @@ fn json_string_array(items: &[String]) -> String {
 /// Split `args` into positionals, valued options (`--name value` or
 /// `--name=value`), and boolean flags (`--flag`). Names in `valued` /
 /// `boolean` are given without the leading dashes.
-fn parse_args(
-    args: &[String],
-    valued: &[&str],
-    boolean: &[&str],
-) -> Result<(Vec<String>, Vec<(String, String)>, Vec<String>), String> {
+/// Positionals, `--name value` pairs, and boolean flags, in that order.
+type ParsedArgs = (Vec<String>, Vec<(String, String)>, Vec<String>);
+
+fn parse_args(args: &[String], valued: &[&str], boolean: &[&str]) -> Result<ParsedArgs, String> {
     let mut positional: Vec<String> = Vec::new();
     let mut values: Vec<(String, String)> = Vec::new();
     let mut flags: Vec<String> = Vec::new();
     let mut i = 0usize;
+    let mut only_positional = false;
     while i < args.len() {
         let arg = &args[i];
+        if only_positional {
+            positional.push(arg.clone());
+            i += 1;
+            continue;
+        }
+        if arg == "--" {
+            only_positional = true;
+            i += 1;
+            continue;
+        }
         match arg.strip_prefix("--") {
             Some(rest) => {
                 let (name, inline_value) = match rest.find('=') {
@@ -272,6 +290,9 @@ fn parse_args(
                             }
                         }
                     };
+                    if values.iter().any(|(n, _)| n == name) {
+                        return Err(format!("option --{name} was given more than once"));
+                    }
                     values.push((name.to_string(), value));
                 } else if boolean.contains(&name) {
                     match inline_value {
@@ -348,25 +369,6 @@ fn join_out(dir: &Path, name: &str) -> PathBuf {
     }
 }
 
-/// Make a file-name component: replace characters Windows forbids in
-/// file names (and control characters) with `-`.
-fn safe_file_name(raw: &str) -> String {
-    let mut out = String::new();
-    for c in raw.chars() {
-        if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || (c as u32) < 0x20 {
-            out.push('-');
-        } else {
-            out.push(c);
-        }
-    }
-    let trimmed = out.trim_matches(|c| c == '.' || c == ' ');
-    if trimmed.is_empty() {
-        "App".to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
-
 /// Walk a source directory and read every file, sorted by path, with
 /// forward-slash relative paths — the same walk the packer performs.
 fn collect_source_files(dir: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
@@ -418,6 +420,21 @@ fn is_empty_array_line(line: &str, name: &str) -> bool {
         None => return false,
     };
     rest.trim() == "[]"
+}
+
+/// Cheap structural check for a PE image: `MZ` magic, a plausible
+/// `e_lfanew`, and a `PE\0\0` signature at that offset. Full PE parsing
+/// is deliberately out of scope — this only stops accidental or obvious
+/// non-executables from being packed as a stub.
+fn looks_like_pe(bytes: &[u8]) -> bool {
+    if bytes.len() < 0x40 || &bytes[0..2] != b"MZ" {
+        return false;
+    }
+    let lfanew = u32::from_le_bytes([bytes[0x3C], bytes[0x3D], bytes[0x3E], bytes[0x3F]]) as usize;
+    if lfanew < 0x40 || lfanew.checked_add(4).map_or(true, |end| end > bytes.len()) {
+        return false;
+    }
+    &bytes[lfanew..lfanew + 4] == b"PE\0\0"
 }
 
 /// Build the example project TOML from `ProjectConfig::default()`
@@ -490,8 +507,8 @@ fn example_toml() -> Result<String, String> {
     }
     out.push_str("\n# Optional extras - remove the leading \"# \" to enable an entry.\n");
     out.push_str("#\n");
-    out.push_str("# Shortcuts (location is \"desktop\", \"start-menu\", or a folder\n");
-    out.push_str("# under the install dir):\n");
+    out.push_str("# Shortcuts (location is \"desktop\" or \"start-menu\"; target is\n");
+    out.push_str("# relative to the install dir):\n");
     out.push_str("# [[shortcuts]]\n");
     out.push_str("# name = \"My App\"\n");
     out.push_str("# location = \"desktop\"\n");
@@ -536,12 +553,9 @@ fn example_toml() -> Result<String, String> {
 fn load_project_file(path: &str, command: &str) -> Result<ProjectConfig, Fail> {
     let text = fs::read_to_string(path)
         .map_err(|e| Fail::io(command, format!("could not read {path}: {e}")))?;
-    let cfg = ProjectConfig::from_toml(&text).map_err(|m| Fail::validation(command, vec![m]))?;
-    let errors = cfg.validate();
-    if !errors.is_empty() {
-        return Err(Fail::validation(command, errors));
-    }
-    Ok(cfg)
+    // `from_toml_checked` performs migration, normalisation, and full
+    // validation, returning every problem at once.
+    ProjectConfig::from_toml_checked(&text).map_err(|errors| Fail::validation(command, errors))
 }
 
 // ---------------------------------------------------------------------------
@@ -639,12 +653,38 @@ fn cmd_validate(args: &[String]) -> Result<CmdOk, Fail> {
     }
     let path = &positional[0];
     let cfg = load_project_file(path, "validate")?;
-    let human = format!("Valid: {path} - {} v{}\n", cfg.app.name, cfg.app.version);
+    // `validate` is the command people trust before packing, so it also
+    // checks the things only the filesystem can answer.
+    let mut warnings: Vec<String> = Vec::new();
+    let project_dir = project_dir_of(path);
+    let source = resolve_relative(&project_dir, &cfg.install.source_dir);
+    if !source.is_dir() {
+        warnings.push(format!(
+            "payload source directory not found: {}",
+            source.display()
+        ));
+    }
+    if !cfg.install.license_file.trim().is_empty() {
+        let license = resolve_relative(&project_dir, &cfg.install.license_file);
+        if !license.is_file() {
+            warnings.push(format!("license file not found: {}", license.display()));
+        }
+    }
+    // Keep the "Valid:" prefix stable for scripts; extra filesystem
+    // warnings are appended rather than replacing it.
+    let mut human = format!("Valid: {path} - {} v{}\n", cfg.app.name, cfg.app.version);
+    if !warnings.is_empty() {
+        human.push_str("Note: these will stop `pack` until fixed:\n");
+        for w in &warnings {
+            human.push_str(&format!("  - {w}\n"));
+        }
+    }
     let json = format!(
-        "{{\"ok\":true,\"command\":\"validate\",\"path\":{},\"app\":{},\"version\":{},\"errors\":[]}}",
+        "{{\"ok\":true,\"command\":\"validate\",\"path\":{},\"app\":{},\"version\":{},\"warnings\":{},\"errors\":[]}}",
         json_str(path),
         json_str(&cfg.app.name),
-        json_str(&cfg.app.version)
+        json_str(&cfg.app.version),
+        json_string_array(&warnings)
     );
     Ok(CmdOk {
         human,
@@ -690,11 +730,87 @@ fn cmd_pack(args: &[String]) -> Result<CmdOk, Fail> {
     })?;
 
     let source_dir = resolve_relative(&project_dir, &cfg.install.source_dir);
+    // Pack-time checks the schema cannot make (it does not see the disk):
+    // a missing source directory, a missing license file, and a stub that
+    // is not a Windows executable all fail here rather than at install time.
+    if !source_dir.is_dir() {
+        return Err(Fail::io(
+            "pack",
+            format!(
+                "payload source directory not found: {} (install.source_dir = {:?})",
+                source_dir.display(),
+                cfg.install.source_dir
+            ),
+        ));
+    }
+    // Embed the license text so the wizard's license page shows the real
+    // agreement (and keeps working after the source tree is gone).
+    let mut cfg = cfg;
+    if !cfg.install.license_file.trim().is_empty() {
+        let license = resolve_relative(&project_dir, &cfg.install.license_file);
+        let text = fs::read_to_string(&license).map_err(|e| {
+            Fail::io(
+                "pack",
+                format!(
+                    "could not read license file {}: {e} (it must be UTF-8 text)",
+                    license.display()
+                ),
+            )
+        })?;
+        if text.trim().is_empty() {
+            return Err(Fail::validation(
+                "pack",
+                vec![format!("license file {} is empty", license.display())],
+            ));
+        }
+        cfg.install.license_text = text;
+    } else if !cfg.install.license_text.trim().is_empty() {
+        // Text left over from a hand-edited project file is fine, but cap
+        // it so a huge blob cannot bloat every installer payload.
+        const MAX_LICENSE_BYTES: usize = 256 * 1024;
+        if cfg.install.license_text.len() > MAX_LICENSE_BYTES {
+            return Err(Fail::validation(
+                "pack",
+                vec![format!(
+                    "install.license_text is {} bytes (max {MAX_LICENSE_BYTES}); \
+                     point license_file at a file instead",
+                    cfg.install.license_text.len()
+                )],
+            ));
+        }
+    }
+    // Reject anything that is not a PE image: a text file or a renamed
+    // archive as `--stub` would otherwise produce an installer that
+    // Windows refuses to launch.
+    if !looks_like_pe(&stub_bytes) {
+        return Err(Fail::io(
+            "pack",
+            format!(
+                "{} is not a Windows executable (no MZ/PE headers); pass the RustPacker stub",
+                stub_path.display()
+            ),
+        ));
+    }
     let config_json = cfg
         .to_json()
         .map_err(|m| Fail::io("pack", format!("could not serialise project: {m}")))?;
     let (setup_bytes, entries) =
         pack_directory(&stub_bytes, &source_dir, &config_json).map_err(|m| Fail::io("pack", m))?;
+    // The installer launches app.main_exe; if the payload does not contain
+    // it, the build produces an installer that fails at launch time.
+    if !entries
+        .iter()
+        .any(|e| e.path.eq_ignore_ascii_case(cfg.app.main_exe.trim()))
+    {
+        return Err(Fail::validation(
+            "pack",
+            vec![format!(
+                "app.main_exe '{}' is not in the payload from {}; check install.source_dir",
+                cfg.app.main_exe,
+                source_dir.display()
+            )],
+        ));
+    }
 
     let out_dir = PathBuf::from(&out_dir_arg);
     fs::create_dir_all(&out_dir).map_err(|e| {
@@ -726,7 +842,7 @@ fn cmd_pack(args: &[String]) -> Result<CmdOk, Fail> {
             refs.push((rel.as_str(), data.as_slice()));
         }
         refs.push(("rustpacker-portable.txt", marker.as_bytes()));
-        portable_bytes = write_stored_zip(&refs);
+        portable_bytes = write_stored_zip(&refs).map_err(|m| Fail::io("pack", m))?;
         let name = format!("{app_stem}-v{version_stem}-Portable.zip");
         let path = join_out(&out_dir, &name);
         fs::write(&path, &portable_bytes)
@@ -737,9 +853,8 @@ fn cmd_pack(args: &[String]) -> Result<CmdOk, Fail> {
 
     let sums_name = "SHA256SUMS.txt".to_string();
     let mut sum_items: Vec<(&str, &[u8])> = vec![(setup_name.as_str(), setup_bytes.as_slice())];
-    match &portable_name {
-        Some(name) => sum_items.push((name.as_str(), portable_bytes.as_slice())),
-        None => {}
+    if let Some(name) = &portable_name {
+        sum_items.push((name.as_str(), portable_bytes.as_slice()));
     }
     let sums_text = sha256sums_txt(&sum_items);
     let sums_path = join_out(&out_dir, &sums_name);
@@ -760,9 +875,8 @@ fn cmd_pack(args: &[String]) -> Result<CmdOk, Fail> {
         "Packed {} v{}\n  Setup: {setup_display} ({file_count} files, {total_bytes} payload bytes)\n",
         cfg.app.name, cfg.app.version
     );
-    match &portable_path {
-        Some(p) => human.push_str(&format!("  Portable: {}\n", p.display())),
-        None => {}
+    if let Some(p) = &portable_path {
+        human.push_str(&format!("  Portable: {}\n", p.display()));
     }
     human.push_str(&format!("  Checksums: {sums_display}\n"));
 
@@ -816,6 +930,22 @@ fn cmd_read_setup(args: &[String], command: &str) -> Result<(String, Vec<u8>), F
 fn cmd_verify(args: &[String]) -> Result<CmdOk, Fail> {
     let (path, bytes) = cmd_read_setup(args, "verify")?;
     let manifest = read_manifest(&bytes).map_err(|m| Fail::io("verify", m))?;
+    // `verify` is the "will this installer actually work?" command, so it
+    // also checks what the stub checks at startup: an embedded project
+    // config that parses and validates. `list` stays lenient.
+    let mut problems: Vec<String> = Vec::new();
+    match &manifest.config_json {
+        None => problems.push(
+            "the payload has no embedded project config (the installer cannot run)".to_string(),
+        ),
+        Some(json) => match ProjectConfig::from_json(json) {
+            Ok(cfg) => problems.extend(cfg.validate()),
+            Err(e) => problems.push(format!("the embedded project config is invalid: {e}")),
+        },
+    }
+    if !problems.is_empty() {
+        return Err(Fail::validation("verify", problems));
+    }
     Ok(setup_report("verify", &path, &bytes, &manifest))
 }
 
@@ -843,9 +973,8 @@ fn setup_report(command: &str, path: &str, bytes: &[u8], manifest: &PayloadManif
     let mut human = String::new();
     if command == "verify" {
         human.push_str(&format!("Verified: {path}\n"));
-        match (&app, &version) {
-            (Some(a), Some(v)) => human.push_str(&format!("App: {a} v{v}\n")),
-            _ => {}
+        if let (Some(a), Some(v)) = (&app, &version) {
+            human.push_str(&format!("App: {a} v{v}\n"));
         }
         if !payload_sha.is_empty() {
             human.push_str(&format!("Payload SHA-256: {payload_sha}\n"));
@@ -898,11 +1027,11 @@ fn setup_report(command: &str, path: &str, bytes: &[u8], manifest: &PayloadManif
 
 fn cmd_extract(args: &[String]) -> Result<CmdOk, Fail> {
     let (positional, values, _flags) =
-        parse_args(args, &["out"], &[]).map_err(|m| Fail::usage(Some("extract"), &m))?;
+        parse_args(args, &["out"], &["force"]).map_err(|m| Fail::usage(Some("extract"), &m))?;
     if positional.len() != 1 {
         return Err(Fail::usage(
             Some("extract"),
-            "usage: rustpacker-cli extract <Setup.exe> --out <dir>",
+            "usage: rustpacker-cli extract <Setup.exe> --out <dir> [--force]",
         ));
     }
     let path = positional[0].clone();
@@ -913,6 +1042,22 @@ fn cmd_extract(args: &[String]) -> Result<CmdOk, Fail> {
     let bytes =
         fs::read(&path).map_err(|e| Fail::io("extract", format!("could not read {path}: {e}")))?;
     let out_dir = PathBuf::from(&out);
+    // Extracting into a populated folder can silently overwrite files the
+    // user cares about; `--force` makes that explicit.
+    if out_dir.exists() {
+        let occupied = fs::read_dir(&out_dir)
+            .map(|mut it| it.next().is_some())
+            .unwrap_or(false);
+        if occupied && !has_flag(&_flags, "force") {
+            return Err(Fail::io(
+                "extract",
+                format!(
+                    "{out} is not empty (pass --force to extract into it anyway; \
+                     files with the same names will be overwritten)"
+                ),
+            ));
+        }
+    }
     fs::create_dir_all(&out_dir)
         .map_err(|e| Fail::io("extract", format!("could not create {out}: {e}")))?;
     let extracted = extract_payload(&bytes, &out_dir).map_err(|m| Fail::io("extract", m))?;
@@ -945,4 +1090,63 @@ fn cmd_schema(args: &[String]) -> Result<CmdOk, Fail> {
         human: text,
         json: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_args_accepts_flags_and_values() {
+        let args = vec![
+            "p.toml".to_string(),
+            "--stub".to_string(),
+            "s.exe".to_string(),
+            "--portable".to_string(),
+        ];
+        let (positional, values, flags) =
+            parse_args(&args, &["stub"], &["portable"]).expect("parse");
+        assert_eq!(positional, vec!["p.toml".to_string()]);
+        assert_eq!(opt_value(&values, "stub").as_deref(), Some("s.exe"));
+        assert!(has_flag(&flags, "portable"));
+    }
+
+    #[test]
+    fn unknown_option_is_a_usage_error() {
+        let args = vec!["--nope".to_string()];
+        assert!(parse_args(&args, &[], &[]).is_err());
+    }
+
+    #[test]
+    fn missing_value_is_a_usage_error() {
+        let args = vec!["--out-dir".to_string()];
+        assert!(parse_args(&args, &["out-dir"], &[]).is_err());
+    }
+
+    #[test]
+    fn json_escaping_handles_quotes_and_controls() {
+        assert_eq!(json_str("a\"b"), "\"a\\\"b\"");
+        assert_eq!(json_str("line\nbreak"), "\"line\\nbreak\"");
+        assert_eq!(json_string_array(&["a".to_string()]), "[\"a\"]");
+    }
+
+    #[test]
+    fn output_names_are_windows_safe() {
+        // The shared sanitiser must strip path separators from a version.
+        assert_eq!(safe_file_name("1.0/../evil"), "1.0-..-evil");
+        assert_eq!(safe_file_name("CON"), "_CON");
+    }
+
+    #[test]
+    fn example_toml_round_trips_and_validates() {
+        // The template printed by `init`/`schema` and the serialiser used
+        // by the GUI must both produce a project that parses and passes
+        // validation (deny_unknown_fields would catch a stale template).
+        let text = example_toml().expect("template");
+        let cfg = ProjectConfig::from_toml_checked(&text)
+            .unwrap_or_else(|errs| panic!("template does not validate: {errs:?}"));
+        assert!(cfg.validate().is_empty());
+        let json = ProjectConfig::default().to_json().expect("json");
+        ProjectConfig::from_json(&json).expect("default JSON must parse back");
+    }
 }

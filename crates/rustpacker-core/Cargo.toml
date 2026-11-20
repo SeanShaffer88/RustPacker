@@ -2,6 +2,7 @@
 name = "rustpacker-core"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "Core library for RustPacker: project schema, installer theme, typewriter, journal, and payload pack/extract."

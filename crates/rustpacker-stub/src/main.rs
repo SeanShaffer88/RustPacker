@@ -11,6 +11,7 @@
 //!   * `--uninstall`           uninstall using the journal beside this exe
 //!   * `--uninstall --silent`  uninstall with no UI at all
 //!   * `--help`                show usage in a message box
+//!
 //! Uninstall mode is also selected automatically when this exe's file
 //! name is `Uninstall.exe`.
 //!
@@ -40,8 +41,9 @@ fn main() {
 #[cfg(windows)]
 mod imp {
     use rustpacker_core::{
-        extract_payload, find_payload, read_manifest, InstallJournal, InstallScope, JournalAction,
-        ProjectConfig, Typewriter, JOURNAL_FILE_NAME, UNINSTALLER_FILE_NAME,
+        extract_payload, find_payload, read_manifest, sha256_hex, InstallJournal, InstallScope,
+        JournalAction, Prerequisite, ProjectConfig, Typewriter, JOURNAL_FILE_NAME,
+        UNINSTALLER_FILE_NAME,
     };
     use std::cell::RefCell;
     use std::collections::HashSet;
@@ -61,8 +63,8 @@ mod imp {
     };
     use windows_sys::Win32::System::Registry::{
         RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegDeleteValueW, RegOpenKeyExW,
-        RegSetValueExW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_SET_VALUE, KEY_WRITE,
-        REG_OPTION_NON_VOLATILE, REG_SZ,
+        RegQueryValueExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ,
+        KEY_SET_VALUE, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ,
     };
     use windows_sys::Win32::UI::Controls::{
         ICC_PROGRESS_CLASS, INITCOMMONCONTROLSEX, PBM_SETPOS, PBM_SETRANGE32,
@@ -73,15 +75,17 @@ mod imp {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         EnableWindow, SetFocus, VK_RETURN, VK_SPACE,
     };
-    use windows_sys::Win32::UI::Shell::{SHGetFolderPathW, ShellExecuteW, CSIDL_DESKTOPDIRECTORY};
+    use windows_sys::Win32::UI::Shell::{
+        SHGetFolderPathW, ShellExecuteW, CSIDL_DESKTOPDIRECTORY, CSIDL_PROGRAMS,
+    };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
         GetWindowTextW, KillTimer, LoadCursorW, MessageBoxW, PostQuitMessage, RegisterClassExW,
         SendMessageW, SetTimer, SetWindowTextW, ShowWindow, TranslateMessage, BM_GETCHECK,
-        BM_SETCHECK, BN_CLICKED, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, HMENU, IDC_ARROW,
-        MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MSG, STN_CLICKED, SW_SHOWNORMAL, WM_COMMAND,
-        WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN,
-        WM_PARENTNOTIFY, WM_SETFONT, WM_TIMER, WNDCLASSEXW,
+        BM_SETCHECK, BN_CLICKED, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, HMENU, IDC_ARROW, IDYES,
+        MB_DEFBUTTON2, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK, MB_YESNO, MSG,
+        STN_CLICKED, SW_SHOWNORMAL, WM_COMMAND, WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC,
+        WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_PARENTNOTIFY, WM_SETFONT, WM_TIMER, WNDCLASSEXW,
     };
 
     // Control IDs.
@@ -161,27 +165,40 @@ mod imp {
         cfg
     }
 
-    /// Read the embedded project config from our own exe, if packed.
-    fn load_config() -> (ProjectConfig, bool) {
-        let Some(exe) = std::env::current_exe().ok() else {
-            return (demo_config(), false);
-        };
-        let Some(bytes) = std::fs::read(&exe).ok() else {
-            return (demo_config(), false);
-        };
+    /// Read the embedded project config from our own exe.
+    ///
+    /// Demo mode is entered **only** when this binary genuinely carries
+    /// no payload. A packed installer whose payload is corrupt, whose
+    /// config is missing/invalid, or whose config fails validation is a
+    /// hard error: silently installing a placeholder app instead would
+    /// hide tampering and leave a bogus Apps & Features entry behind.
+    fn load_config() -> Result<(ProjectConfig, bool), String> {
+        let exe =
+            std::env::current_exe().map_err(|e| format!("could not locate this installer: {e}"))?;
+        let bytes =
+            std::fs::read(&exe).map_err(|e| format!("could not read this installer: {e}"))?;
         if find_payload(&bytes).is_err() {
-            return (demo_config(), false);
+            // Genuinely not packed: demo mode is intentional here.
+            return Ok((demo_config(), false));
         }
-        let Ok(manifest) = read_manifest(&bytes) else {
-            return (demo_config(), false);
-        };
-        let Some(json) = manifest.config_json else {
-            return (demo_config(), false);
-        };
-        match ProjectConfig::from_json(&json) {
-            Ok(cfg) => (cfg, true),
-            Err(_) => (demo_config(), false),
+        let manifest = read_manifest(&bytes).map_err(|e| {
+            format!("this installer's payload is damaged and cannot be read:\n\n{e}")
+        })?;
+        let json = manifest.config_json.ok_or(
+            "this installer's payload has no project configuration, so it cannot be installed.\n\
+             Rebuild it with `rustpacker-cli pack`.",
+        )?;
+        let cfg = ProjectConfig::from_json(&json).map_err(|e| {
+            format!("this installer's embedded project configuration is invalid:\n\n{e}")
+        })?;
+        let errors = cfg.validate();
+        if !errors.is_empty() {
+            return Err(format!(
+                "this installer's embedded project configuration failed validation:\n\n  - {}",
+                errors.join("\n  - ")
+            ));
         }
+        Ok((cfg, true))
     }
 
     fn sanitize_folder(name: &str) -> String {
@@ -211,7 +228,7 @@ mod imp {
         if Path::new(configured).is_absolute() {
             return configured.to_string();
         }
-        let per_machine = matches!(cfg.install.scope, InstallScope::PerMachine)
+        let per_machine = cfg.install.scope.resolve(is_elevated()).is_machine_wide()
             || configured == "{per-machine-programs}";
         let root = if per_machine {
             std::env::var_os("ProgramFiles").map(PathBuf::from)
@@ -222,6 +239,156 @@ mod imp {
         root.join(sanitize_folder(&cfg.app.name))
             .to_string_lossy()
             .into_owned()
+    }
+
+    // ------------------------------------------------------------------
+    // Prerequisites, running-process checks, and PATH helpers
+    // ------------------------------------------------------------------
+
+    /// Expand `%VAR%` references in a probe path (case-insensitive).
+    fn expand_env(raw: &str) -> String {
+        let chars: Vec<char> = raw.chars().collect();
+        let mut out = String::new();
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] == '%' {
+                if let Some(close) = chars[i + 1..].iter().position(|&c| c == '%') {
+                    let name: String = chars[i + 1..i + 1 + close].iter().collect();
+                    if let Some(val) = std::env::var_os(&name) {
+                        out.push_str(&val.to_string_lossy());
+                        i += close + 2;
+                        continue;
+                    }
+                }
+            }
+            out.push(chars[i]);
+            i += 1;
+        }
+        out
+    }
+
+    fn reg_key_exists(root: HKEY, subkey: &str) -> bool {
+        let wsub = wide(subkey);
+        let mut hk: HKEY = std::ptr::null_mut();
+        let rc = unsafe { RegOpenKeyExW(root, pcw(&wsub), 0, KEY_READ, &mut hk) };
+        if rc == ERROR_SUCCESS {
+            let _ = unsafe { RegCloseKey(hk) };
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Evaluate one prerequisite. Returns `None` when it is satisfied and
+    /// `Some(message)` when it is not.
+    ///
+    /// `registry_probe` accepts `HKLM\Path\To\Key` (key must exist) or
+    /// `HKLM\Path\To\Key\ValueName` (value must exist).
+    fn unmet_prerequisite(pr: &Prerequisite) -> Option<String> {
+        let probe = pr.registry_probe.trim();
+        if !probe.is_empty() {
+            let mut parts = probe.splitn(2, '\\');
+            let root_name = parts.next().unwrap_or("");
+            let rest = parts.next().unwrap_or("");
+            let (key, value) = match rest.rsplit_once('\\') {
+                Some((k, v)) if !k.is_empty() && !v.is_empty() => (k.to_string(), v.to_string()),
+                _ => (rest.to_string(), String::new()),
+            };
+            let root = root_hkey(root_name);
+            let found = if value.is_empty() {
+                reg_key_exists(root, &key)
+            } else {
+                reg_get_sz(root, &key, &value).is_some()
+            };
+            if !found {
+                return Some(pr.message.clone());
+            }
+        }
+        let file_probe = pr.file_probe.trim();
+        if !file_probe.is_empty() && !Path::new(&expand_env(file_probe)).exists() {
+            return Some(pr.message.clone());
+        }
+        None
+    }
+
+    /// True when a process with this image name is running.
+    fn process_running(image_name: &str) -> bool {
+        use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+            TH32CS_SNAPPROCESS,
+        };
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+        if snapshot as isize == -1 {
+            return false;
+        }
+        let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut found = false;
+        let mut ok = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
+        while ok {
+            let len = entry
+                .szExeFile
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(entry.szExeFile.len());
+            let name = String::from_utf16_lossy(&entry.szExeFile[..len]);
+            if name.eq_ignore_ascii_case(image_name) {
+                found = true;
+                break;
+            }
+            ok = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
+        }
+        let _ = unsafe { windows_sys::Win32::Foundation::CloseHandle(snapshot) };
+        found
+    }
+
+    /// Current Windows build number (e.g. 22631), or 0 when unknown.
+    fn windows_build() -> u32 {
+        use windows_sys::Win32::System::SystemInformation::{GetVersionExW, OSVERSIONINFOW};
+        let mut info: OSVERSIONINFOW = unsafe { std::mem::zeroed() };
+        info.dwOSVersionInfoSize = std::mem::size_of::<OSVERSIONINFOW>() as u32;
+        let rc = unsafe { GetVersionExW(&mut info) };
+        if rc == 0 {
+            return 0;
+        }
+        info.dwBuildNumber
+    }
+
+    /// Blocking pre-flight checks. Returns a user-facing reason to abort.
+    fn preflight_blocker(cfg: &ProjectConfig) -> Option<String> {
+        let running: Vec<String> = cfg
+            .process_checks
+            .iter()
+            .filter(|pc| process_running(pc.process_name.trim()))
+            .map(|pc| format!("{} — {}", pc.process_name.trim(), pc.message.trim()))
+            .collect();
+        if !running.is_empty() {
+            return Some(format!(
+                "Close the following before installing, then run Setup again:\n\n{}",
+                running.join("\n\n")
+            ));
+        }
+        if cfg.install.min_windows_build > 0 {
+            let build = windows_build();
+            if build > 0 && build < cfg.install.min_windows_build {
+                return Some(format!(
+                    "This application needs Windows build {} or newer; this PC reports build {build}.",
+                    cfg.install.min_windows_build
+                ));
+            }
+        }
+        let unmet: Vec<String> = cfg
+            .prerequisites
+            .iter()
+            .filter_map(unmet_prerequisite)
+            .collect();
+        if !unmet.is_empty() {
+            return Some(format!(
+                "This application needs software that is not installed:\n\n{}",
+                unmet.join("\n\n")
+            ));
+        }
+        None
     }
 
     // ------------------------------------------------------------------
@@ -310,6 +477,213 @@ mod imp {
         let _ = unsafe { RegDeleteTreeW(root, pcw(&wsub)) };
     }
 
+    /// Read an existing `REG_SZ` value, or `None` when it does not exist.
+    fn reg_get_sz(root: HKEY, subkey: &str, name: &str) -> Option<String> {
+        let wsub = wide(subkey);
+        let mut hk: HKEY = std::ptr::null_mut();
+        let rc = unsafe { RegOpenKeyExW(root, pcw(&wsub), 0, KEY_READ, &mut hk) };
+        if rc != ERROR_SUCCESS {
+            return None;
+        }
+        let wname = wide(name);
+        let mut ty: u32 = 0;
+        let mut len: u32 = 0;
+        let rc = unsafe {
+            RegQueryValueExW(
+                hk,
+                pcw(&wname),
+                std::ptr::null_mut(),
+                &mut ty,
+                std::ptr::null_mut(),
+                &mut len,
+            )
+        };
+        if rc != ERROR_SUCCESS || ty != REG_SZ || len == 0 || len > 64 * 1024 {
+            let _ = unsafe { RegCloseKey(hk) };
+            return None;
+        }
+        let mut buf = vec![0u8; len as usize];
+        let rc = unsafe {
+            RegQueryValueExW(
+                hk,
+                pcw(&wname),
+                std::ptr::null_mut(),
+                &mut ty,
+                buf.as_mut_ptr(),
+                &mut len,
+            )
+        };
+        let _ = unsafe { RegCloseKey(hk) };
+        if rc != ERROR_SUCCESS {
+            return None;
+        }
+        let units: Vec<u16> = buf[..len as usize]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .take_while(|&u| u != 0)
+            .collect();
+        Some(String::from_utf16_lossy(&units))
+    }
+
+    /// Ask Windows to delete `path` on the next boot (used for the running
+    /// uninstaller). Returns whether the request succeeded.
+    fn schedule_delete_on_reboot(path: &Path) -> bool {
+        use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_DELAY_UNTIL_REBOOT};
+        let wpath = wide(&path.to_string_lossy());
+        let rc = unsafe { MoveFileExW(pcw(&wpath), std::ptr::null(), MOVEFILE_DELAY_UNTIL_REBOOT) };
+        rc != 0
+    }
+
+    /// Remove the Apps & Features key for an app (used when an install is
+    /// abandoned before its journal exists).
+    fn remove_arp_entry(arp_root_name: &str, arp_key: &str) {
+        reg_delete_tree(root_hkey(arp_root_name), arp_key);
+    }
+
+    /// Undo a journal in reverse order. Returns a list of items that
+    /// could not be undone. Paths outside `install_dir` are refused, so
+    /// a tampered journal can never delete unrelated files.
+    ///
+    /// Directories are removed after every file (they are only removed
+    /// when empty), which fixes the old reverse-order bug where a
+    /// parent folder was tried before the files inside it.
+    fn rollback_journal(journal: &InstallJournal, install_dir: &str) -> Vec<String> {
+        let mut failures: Vec<String> = Vec::new();
+        let base = Path::new(install_dir);
+        let confined = |p: &str| journal.is_path_confined(p);
+        let dirs: Vec<String> = journal
+            .rollback_plan()
+            .into_iter()
+            .filter_map(|a| match a {
+                JournalAction::CreateDir { path } => Some(path.clone()),
+                _ => None,
+            })
+            .collect();
+        for action in journal.rollback_plan() {
+            match action {
+                JournalAction::CreateFile { path } | JournalAction::CreateShortcut { path } => {
+                    if !confined(path) {
+                        failures.push(format!(
+                            "refused to delete outside the install folder: {path}"
+                        ));
+                        continue;
+                    }
+                    if Path::new(path).is_file() {
+                        if let Err(e) = std::fs::remove_file(path) {
+                            failures.push(format!("{path}: {e}"));
+                        }
+                    }
+                }
+                JournalAction::OverwriteFile { path, backup_name } => {
+                    if !confined(path) {
+                        failures.push(format!(
+                            "refused to restore outside the install folder: {path}"
+                        ));
+                        continue;
+                    }
+                    // `backup_name` comes from the journal file, so it is
+                    // validated before it is joined to the install folder:
+                    // a crafted name must not reach outside it.
+                    let backup = match journal.backup_path(backup_name) {
+                        Some(p) => p,
+                        None => {
+                            failures.push(format!(
+                                "refused a malformed backup name for {path}: {backup_name}"
+                            ));
+                            continue;
+                        }
+                    };
+                    if backup.is_file() {
+                        let _ = std::fs::remove_file(path);
+                        if let Err(e) = std::fs::rename(&backup, path) {
+                            failures.push(format!("{path}: {e}"));
+                        }
+                    }
+                }
+                JournalAction::RegistryValue {
+                    root,
+                    key,
+                    name,
+                    previous_value,
+                } => {
+                    let hk_root = root_hkey(root);
+                    match previous_value {
+                        Some(prev) => {
+                            let _ = reg_set_sz_at(hk_root, key, name, prev);
+                        }
+                        None => reg_delete_value(hk_root, key, name),
+                    }
+                }
+                JournalAction::RunEntry { name } => {
+                    reg_delete_value(HKEY_CURRENT_USER, RUN_KEY, name);
+                }
+                JournalAction::ArpEntry { root, key } => {
+                    reg_delete_tree(root_hkey(root), key);
+                }
+                JournalAction::FileAssociation {
+                    extension,
+                    prog_id,
+                    previous_existed,
+                } => {
+                    if !previous_existed {
+                        let classes = "Software\\Classes";
+                        reg_delete_tree(HKEY_CURRENT_USER, &format!("{classes}\\{extension}"));
+                        reg_delete_tree(HKEY_CURRENT_USER, &format!("{classes}\\{prog_id}"));
+                    }
+                }
+                JournalAction::PathEntry { scope, added_dir } => {
+                    // PATH is rewritten by the RegistryValue entry recorded
+                    // alongside this one (which restores the old value or
+                    // deletes the value when it did not exist). This arm
+                    // only exists to remove the folder from a PATH that a
+                    // *foreign* journal appended it to.
+                    let root = root_hkey(scope);
+                    if let Some(current) = reg_get_sz(root, "Environment", "Path") {
+                        let kept: Vec<&str> = current
+                            .split(';')
+                            .filter(|p| !p.trim().eq_ignore_ascii_case(added_dir.trim()))
+                            .collect();
+                        if kept.len() != current.split(';').count() {
+                            let _ = reg_set_sz_at(root, "Environment", "Path", &kept.join(";"));
+                        }
+                    }
+                }
+                JournalAction::CreateDir { .. } => {}
+            }
+        }
+        // Any journal this installer wrote into the folder is ours to
+        // remove (the caller re-saves it on success).
+        let journal_in_dir = base.join(JOURNAL_FILE_NAME);
+        if journal_in_dir.is_file() {
+            let _ = std::fs::remove_file(&journal_in_dir);
+        }
+        // Backups that were not consumed by a restore (or that belonged to
+        // files already gone) are installer artefacts and must not keep a
+        // folder from being removed.
+        let backup_prefix = format!("{JOURNAL_FILE_NAME}.");
+        if let Ok(read) = std::fs::read_dir(base) {
+            for entry in read.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.starts_with(&backup_prefix) && name.ends_with(".bak") {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+        // Files are gone now: remove directories deepest-first so a
+        // parent is only attempted after its children.
+        let mut sorted = dirs;
+        sorted.sort_by_key(|p| std::cmp::Reverse(p.len()));
+        for dir in sorted {
+            if !confined(&dir) {
+                continue;
+            }
+            // `remove_dir` only succeeds on an empty folder, so a user's
+            // pre-existing folder is never removed here.
+            let _ = std::fs::remove_dir(&dir);
+        }
+        failures
+    }
+
     // ------------------------------------------------------------------
     // Desktop shortcut via IShellLinkW / IPersistFile COM.
     //
@@ -381,12 +755,13 @@ mod imp {
         Ok(out)
     }
 
-    fn desktop_dir() -> Result<PathBuf, String> {
+    /// Resolve a shell known folder (Desktop, Start Menu, ...).
+    fn known_folder(csidl: i32, label: &str) -> Result<PathBuf, String> {
         let mut buf = vec![0u16; 1024];
         let hr = unsafe {
             SHGetFolderPathW(
                 std::ptr::null_mut(),
-                CSIDL_DESKTOPDIRECTORY as i32,
+                csidl,
                 std::ptr::null_mut(),
                 0,
                 buf.as_mut_ptr(),
@@ -394,28 +769,75 @@ mod imp {
         };
         if hr != 0 {
             return Err(format!(
-                "could not find the Desktop folder (0x{:08x})",
+                "could not find the {label} folder (0x{:08x})",
                 hr as u32
             ));
         }
         let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        if len == 0 {
+            return Err(format!("the {label} folder path is empty"));
+        }
         Ok(PathBuf::from(String::from_utf16_lossy(&buf[..len])))
     }
 
-    /// Create a `.lnk` pointing at `target`. Returns the link path.
+    fn desktop_dir() -> Result<PathBuf, String> {
+        known_folder(CSIDL_DESKTOPDIRECTORY as i32, "Desktop")
+    }
+
+    fn start_menu_dir() -> Result<PathBuf, String> {
+        known_folder(CSIDL_PROGRAMS as i32, "Start Menu")
+    }
+
+    /// Create a `.lnk` pointing at `target` on the Desktop. Returns the link path.
     fn create_shortcut(
         target: &Path,
         link_name: &str,
         working_dir: &Path,
         description: &str,
     ) -> Result<PathBuf, String> {
-        let desktop = desktop_dir()?;
-        let link_path = desktop.join(format!("{link_name}.lnk"));
+        let folder = desktop_dir()?;
+        create_shortcut_in(&folder, target, link_name, working_dir, description, "")
+    }
+
+    /// Create a `.lnk` for a project `[[shortcuts]]` entry, honouring
+    /// `desktop` / `start-menu` (validated by the caller).
+    fn create_shortcut_at(
+        location: &str,
+        target: &Path,
+        link_name: &str,
+        working_dir: &Path,
+        arguments: &str,
+    ) -> Result<PathBuf, String> {
+        let folder = if location.trim().eq_ignore_ascii_case("desktop") {
+            desktop_dir()?
+        } else {
+            start_menu_dir()?
+        };
+        create_shortcut_in(
+            &folder,
+            target,
+            link_name,
+            working_dir,
+            link_name,
+            arguments,
+        )
+    }
+
+    fn create_shortcut_in(
+        folder: &Path,
+        target: &Path,
+        link_name: &str,
+        working_dir: &Path,
+        description: &str,
+        arguments: &str,
+    ) -> Result<PathBuf, String> {
+        let safe_name = sanitize_folder(link_name);
+        let link_path = folder.join(format!("{safe_name}.lnk"));
         let hr_init = unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32) };
         // S_OK (0) or S_FALSE (1): we own a CoUninitialize. RPC_E_CHANGED_MODE
         // means COM was already initialised differently; proceed without it.
         let we_initialised = hr_init >= 0;
-        let result = create_shortcut_inner(target, &link_path, working_dir, description);
+        let result = create_shortcut_inner(target, &link_path, working_dir, description, arguments);
         if we_initialised {
             unsafe { CoUninitialize() };
         }
@@ -427,6 +849,7 @@ mod imp {
         link_path: &Path,
         working_dir: &Path,
         description: &str,
+        arguments: &str,
     ) -> Result<(), String> {
         unsafe {
             let clsid = windows_sys::Win32::UI::Shell::ShellLink;
@@ -455,6 +878,8 @@ mod imp {
                 let _ = ((*vtbl).set_working_directory)(obj, pcw(&wdir));
                 let wdesc = wide(description);
                 let _ = ((*vtbl).set_description)(obj, pcw(&wdesc));
+                let wargs = wide(arguments);
+                let _ = ((*vtbl).set_arguments)(obj, pcw(&wargs));
                 let persist = com_query(obj, &IID_IPERSIST_FILE)?;
                 let pvtbl = com_vtbl::<IPersistFileVtbl>(persist);
                 let wlink = wide(&link_path.to_string_lossy());
@@ -486,27 +911,86 @@ mod imp {
         install_dir: &str,
         mut report: impl FnMut(u32, &str),
     ) -> Result<InstallOutcome, String> {
-        let dest = PathBuf::from(install_dir);
-        let own_exe =
-            std::env::current_exe().map_err(|e| format!("could not locate this installer: {e}"))?;
-        let per_machine = matches!(cfg.install.scope, InstallScope::PerMachine);
-        let (arp_root, arp_root_name, scope_name) = if per_machine {
-            (HKEY_LOCAL_MACHINE, "HKLM", "per-machine")
-        } else {
-            (HKEY_CURRENT_USER, "HKCU", "per-user")
-        };
+        // Any failure after the first change rolls everything back, so a
+        // half-installed app never reaches Apps & Features. The plan is
+        // journal-driven, so it undoes exactly what was done (including
+        // restored overwritten files and registry values).
+        let effective_scope = cfg.install.scope.resolve(is_elevated());
         let mut journal = InstallJournal::new(
             &cfg.app.app_id,
             &cfg.app.name,
             &cfg.app.version,
             install_dir,
-            scope_name,
+            effective_scope.label(),
         );
+        match perform_install_inner(cfg, install_dir, effective_scope, &mut journal, &mut report) {
+            Ok(()) => Ok(InstallOutcome {
+                journal,
+                install_dir: install_dir.to_string(),
+            }),
+            Err(e) => {
+                // A per-machine install that failed *because we are not
+                // elevated* can often succeed after a UAC re-launch.
+                let wants_machine = cfg.install.scope.resolve(is_elevated()).is_machine_wide()
+                    || matches!(cfg.install.scope, InstallScope::PerMachine);
+                if !is_elevated() && wants_machine {
+                    let undo_failures = rollback_journal(&journal, install_dir);
+                    let detail = if undo_failures.is_empty() {
+                        String::new()
+                    } else {
+                        format!(
+                            "\nSome items may remain:\n  - {}",
+                            undo_failures.join("\n  - ")
+                        )
+                    };
+                    return Err(format!(
+                        "{e}\n\nThis project installs for all users (per-machine), which needs \
+                         administrator rights. Windows asked for elevation, but it was not granted.\
+                         {detail}"
+                    ));
+                }
+                report(0, "Rolling back...");
+                let undo_failures = rollback_journal(&journal, install_dir);
+                if undo_failures.is_empty() {
+                    Err(format!(
+                        "{e}\n\nEvery change made by the installer was rolled back."
+                    ))
+                } else {
+                    Err(format!(
+                        "{e}\n\nRollback was incomplete; these items may remain:\n  - {}",
+                        undo_failures.join("\n  - ")
+                    ))
+                }
+            }
+        }
+    }
+
+    fn perform_install_inner(
+        cfg: &ProjectConfig,
+        install_dir: &str,
+        effective_scope: InstallScope,
+        journal: &mut InstallJournal,
+        report: &mut impl FnMut(u32, &str),
+    ) -> Result<(), String> {
+        let dest = PathBuf::from(install_dir);
+        let own_exe =
+            std::env::current_exe().map_err(|e| format!("could not locate this installer: {e}"))?;
+        let per_machine = effective_scope.is_machine_wide();
+        let (arp_root, arp_root_name) = if per_machine {
+            (HKEY_LOCAL_MACHINE, "HKLM")
+        } else {
+            (HKEY_CURRENT_USER, "HKCU")
+        };
 
         report(5, "Creating the install folder...");
+        // `create_new` tells us whether the folder already existed, so
+        // rollback never deletes a pre-existing user folder.
+        let folder_preexisted = dest.exists();
         std::fs::create_dir_all(&dest)
             .map_err(|e| format!("could not create {}: {e}", dest.display()))?;
-        journal.record_dir(install_dir);
+        if !folder_preexisted {
+            journal.record_dir(install_dir);
+        }
 
         report(20, "Extracting files...");
         let exe_bytes =
@@ -514,22 +998,60 @@ mod imp {
         let mut recorded_dirs: HashSet<String> = HashSet::new();
         recorded_dirs.insert(install_dir.to_string());
         if find_payload(&exe_bytes).is_ok() {
-            let extracted = extract_payload(&exe_bytes, &dest)?;
-            for rel in &extracted {
-                let full = dest.join(rel.replace('/', "\\"));
-                // Record any parent folders the extractor created.
+            // Read the manifest first so folders and overwrite backups are
+            // journaled *before* `extract_payload` writes anything: a
+            // failure part-way through then rolls back every folder the
+            // extractor created, including ones already written.
+            let manifest = read_manifest(&exe_bytes)
+                .map_err(|e| format!("could not read the payload: {e}"))?;
+            for entry in &manifest.files {
+                let full = dest.join(entry.path.replace('/', "\\"));
+                if full.is_file() {
+                    let backup_name = format!(
+                        "{}.{}.bak",
+                        JOURNAL_FILE_NAME,
+                        sha256_hex(entry.path.as_bytes())
+                    );
+                    let backup_path = dest.join(&backup_name);
+                    if !backup_path.exists() {
+                        std::fs::copy(&full, &backup_path).map_err(|e| {
+                            format!("could not back up existing {}: {e}", full.display())
+                        })?;
+                        journal.record(JournalAction::OverwriteFile {
+                            path: full.to_string_lossy().into_owned(),
+                            backup_name,
+                        });
+                    }
+                }
+                let mut parents: Vec<PathBuf> = Vec::new();
                 let mut parent = full.parent().map(|p| p.to_path_buf());
                 while let Some(dir) = parent {
-                    if dir == dest {
+                    if dir == dest || dir.parent().is_none() {
                         break;
                     }
-                    let key = dir.to_string_lossy().into_owned();
-                    if recorded_dirs.insert(key.clone()) {
-                        journal.record_dir(&key);
-                    }
+                    parents.push(dir.clone());
                     parent = dir.parent().map(|p| p.to_path_buf());
                 }
+                for dir in parents.into_iter().rev() {
+                    if !dir.exists() {
+                        let key = dir.to_string_lossy().into_owned();
+                        if recorded_dirs.insert(key.clone()) {
+                            journal.record_dir(&key);
+                        }
+                    }
+                }
                 journal.record_file(&full.to_string_lossy());
+            }
+            let extracted = extract_payload(&exe_bytes, &dest)?;
+            debug_assert_eq!(extracted.len(), manifest.files.len());
+            // The app the installer promises must actually be there.
+            let main_exe = dest.join(&cfg.app.main_exe);
+            if !main_exe.is_file() {
+                return Err(format!(
+                    "the payload does not contain app.main_exe '{}'; the project file and \
+                     install.source_dir do not match",
+                    cfg.app.main_exe
+                ));
             }
         } else {
             // Demo mode: leave a placeholder so the install is real.
@@ -571,25 +1093,155 @@ mod imp {
         reg_result?;
         journal.record(JournalAction::ArpEntry {
             root: arp_root_name.to_string(),
-            key: arp_key,
+            key: arp_key.clone(),
         });
+
+        report(86, "Applying project registry entries...");
+        for entry in &cfg.registry {
+            let hk_root = root_hkey(&entry.root);
+            // Record the previous value first so uninstall can restore it.
+            let previous = reg_get_sz(hk_root, &entry.key, &entry.name);
+            reg_set_sz_at(hk_root, &entry.key, &entry.name, &entry.value)
+                .map_err(|e| format!("could not write registry value {}: {e}", entry.name))?;
+            journal.record(JournalAction::RegistryValue {
+                root: entry.root.clone(),
+                key: entry.key.clone(),
+                name: entry.name.clone(),
+                previous_value: previous,
+            });
+        }
+
+        report(89, "Registering file associations...");
+        for assoc in &cfg.file_associations {
+            let open_exe = dest.join(assoc.open_with.trim());
+            if !open_exe.is_file() {
+                return Err(format!(
+                    "file association {} points at '{}', which the payload does not install",
+                    assoc.extension, assoc.open_with
+                ));
+            }
+            let classes = "Software\\Classes";
+            let ext_key = format!("{classes}\\{}", assoc.extension);
+            let prog_key = format!("{classes}\\{}", assoc.prog_id);
+            let previous_existed = reg_key_exists(HKEY_CURRENT_USER, &ext_key)
+                || reg_key_exists(HKEY_CURRENT_USER, &prog_key);
+            reg_set_sz_at(HKEY_CURRENT_USER, &ext_key, "", assoc.prog_id.trim())
+                .map_err(|e| format!("could not associate {}: {e}", assoc.extension))?;
+            reg_set_sz_at(HKEY_CURRENT_USER, &prog_key, "", assoc.description.trim())
+                .map_err(|e| format!("could not register {}: {e}", assoc.prog_id))?;
+            reg_set_sz_at(
+                HKEY_CURRENT_USER,
+                &format!("{prog_key}\\shell\\open\\command"),
+                "",
+                &format!("\"{}\" \"%1\"", open_exe.to_string_lossy()),
+            )
+            .map_err(|e| format!("could not register the open command: {e}"))?;
+            journal.record(JournalAction::FileAssociation {
+                extension: assoc.extension.clone(),
+                prog_id: assoc.prog_id.clone(),
+                previous_existed,
+            });
+        }
+
+        if !cfg.path_scope.trim().is_empty() {
+            report(90, "Adding the install folder to PATH...");
+            // A per-user install must never write the machine PATH (it
+            // cannot, and a mismatch is a project-validation error).
+            let wants_machine = cfg.path_scope.trim().eq_ignore_ascii_case("machine");
+            let (root, root_name) = if wants_machine && per_machine {
+                (HKEY_LOCAL_MACHINE, "HKLM")
+            } else {
+                (HKEY_CURRENT_USER, "HKCU")
+            };
+            let path_key = "Environment";
+            let previous = reg_get_sz(root, path_key, "Path");
+            let already = previous
+                .as_deref()
+                .map(|p| {
+                    p.split(';').any(|part| {
+                        part.trim()
+                            .trim_end_matches('\\')
+                            .eq_ignore_ascii_case(install_dir.trim().trim_end_matches('\\'))
+                    })
+                })
+                .unwrap_or(false);
+            if !already {
+                let base = previous.clone().unwrap_or_default();
+                let new_path = if base.trim().is_empty() {
+                    install_dir.to_string()
+                } else {
+                    format!("{};{install_dir}", base.trim_end_matches(';'))
+                };
+                reg_set_sz_at(root, path_key, "Path", &new_path)
+                    .map_err(|e| format!("could not add the install folder to PATH: {e}"))?;
+                journal.record(JournalAction::RegistryValue {
+                    root: root_name.to_string(),
+                    key: path_key.to_string(),
+                    name: "Path".to_string(),
+                    previous_value: previous,
+                });
+                journal.record(JournalAction::PathEntry {
+                    scope: root_name.to_string(),
+                    added_dir: install_dir.to_string(),
+                });
+            }
+        }
 
         report(92, "Saving the install journal...");
         journal.record_file(&dest.join(JOURNAL_FILE_NAME).to_string_lossy());
-        journal
-            .save(&dest.join(JOURNAL_FILE_NAME))
-            .map_err(|e| format!("could not save the install journal: {e}"))?;
+        let journal_path = dest.join(JOURNAL_FILE_NAME);
+        if let Err(e) = journal.save(&journal_path) {
+            // Without a journal there is no reliable uninstaller, so the
+            // install is undone rather than left in a half-managed state.
+            remove_arp_entry(arp_root_name, &arp_key);
+            return Err(format!(
+                "could not save the install journal ({e}), so the installation was cancelled"
+            ));
+        }
 
         report(100, "Installation complete.");
-        Ok(InstallOutcome {
-            journal,
-            install_dir: install_dir.to_string(),
-        })
+        Ok(())
     }
 
     // ------------------------------------------------------------------
     // Uninstall (journal rollback)
     // ------------------------------------------------------------------
+
+    /// True when this process can write to `HKLM` (i.e. it holds an
+    /// elevated token). Probing the registry this way avoids a second
+    /// API surface and answers the question the installer actually asks.
+    fn is_elevated() -> bool {
+        let sub = wide("SOFTWARE");
+        let mut hk: HKEY = std::ptr::null_mut();
+        let rc = unsafe { RegOpenKeyExW(HKEY_LOCAL_MACHINE, pcw(&sub), 0, KEY_WRITE, &mut hk) };
+        if rc != ERROR_SUCCESS {
+            return false;
+        }
+        let _ = unsafe { RegCloseKey(hk) };
+        true
+    }
+
+    /// Re-launch this installer elevated (UAC) so a per-machine install
+    /// can proceed. Returns true when the elevated copy was started.
+    fn relaunch_elevated() -> bool {
+        let Ok(exe) = std::env::current_exe() else {
+            return false;
+        };
+        let wfile = wide(&exe.to_string_lossy());
+        let verb = windows_sys::core::w!("runas");
+        let rc = unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                verb,
+                pcw(&wfile),
+                std::ptr::null(),
+                std::ptr::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        // ShellExecuteW returns a value > 32 on success.
+        rc as isize > 32
+    }
 
     fn message_box(text: &str, caption: &str, error: bool) {
         let wtext = wide(text);
@@ -606,6 +1258,11 @@ mod imp {
     /// Undo everything in the journal beside this exe, in rollback order:
     /// files and shortcuts first, then Run/registry entries and the ARP
     /// key, then directories. Returns a process exit code.
+    ///
+    /// Every path is confined to the journal's install directory, so a
+    /// tampered or copied journal cannot delete files elsewhere. When an
+    /// interactive uninstall finds a journal that tries to escape, it
+    /// refuses to proceed instead of asking the user to trust it.
     fn run_uninstall(silent: bool) -> i32 {
         let Some(own_exe) = std::env::current_exe().ok() else {
             if !silent {
@@ -633,75 +1290,66 @@ mod imp {
                 return 1;
             }
         };
-        let own_key = own_exe.to_string_lossy().to_lowercase();
-        let plan: Vec<JournalAction> = journal.rollback_plan().into_iter().cloned().collect();
-        let mut failures: Vec<String> = Vec::new();
-        for action in &plan {
-            match action {
-                JournalAction::CreateFile { path } | JournalAction::CreateShortcut { path } => {
-                    if path.to_lowercase() == own_key {
-                        // A running exe cannot delete itself; the folder
-                        // cleanup below still runs and Windows leaves just
-                        // this one file behind in that case.
-                        continue;
-                    }
-                    if Path::new(path).exists() {
-                        if let Err(e) = std::fs::remove_file(path) {
-                            failures.push(format!("{path}: {e}"));
-                        }
-                    }
-                }
-                JournalAction::OverwriteFile { path, backup_name } => {
-                    if path.to_lowercase() != own_key {
-                        let _ = std::fs::remove_file(path);
-                        let backup = dir.join(backup_name);
-                        if backup.exists() {
-                            let _ = std::fs::rename(&backup, path);
-                        }
-                    }
-                }
-                JournalAction::CreateDir { path } => {
-                    // Only removes the folder when it is already empty.
-                    let _ = std::fs::remove_dir(path);
-                }
-                JournalAction::RunEntry { name } => {
-                    reg_delete_value(HKEY_CURRENT_USER, RUN_KEY, name);
-                }
-                JournalAction::RegistryValue {
-                    root,
-                    key,
-                    name,
-                    previous_value,
-                } => {
-                    let hk_root = root_hkey(root);
-                    match previous_value {
-                        Some(prev) => {
-                            let _ = reg_set_sz_at(hk_root, key, name, prev);
-                        }
-                        None => reg_delete_value(hk_root, key, name),
-                    }
-                }
-                JournalAction::ArpEntry { root, key } => {
-                    reg_delete_tree(root_hkey(root), key);
-                }
-                JournalAction::FileAssociation { extension, prog_id } => {
-                    let classes = "Software\\Classes";
-                    reg_delete_tree(HKEY_CURRENT_USER, &format!("{classes}\\{extension}"));
-                    reg_delete_tree(HKEY_CURRENT_USER, &format!("{classes}\\{prog_id}"));
-                }
-                JournalAction::PathEntry { .. } => {
-                    // This stub never writes PATH entries, so journals it
-                    // creates contain none. A foreign PathEntry would need
-                    // a careful PATH rewrite; leaving PATH untouched is the
-                    // safe failure mode and is reported below the loop via
-                    // the still-present journal copy if uninstall aborts.
-                }
+
+        // Refuse a journal whose own location is not where this exe lives,
+        // or whose entries point outside its install directory.
+        let journal_dir_ok = journal.is_path_confined(&dir.to_string_lossy());
+        let escapes = journal.entries.iter().any(|e| match &e.action {
+            JournalAction::CreateFile { path }
+            | JournalAction::CreateShortcut { path }
+            | JournalAction::OverwriteFile { path, .. }
+            | JournalAction::CreateDir { path } => !journal.is_path_confined(path),
+            _ => false,
+        });
+        if !journal_dir_ok || escapes {
+            if !silent {
+                message_box(
+                    "The install journal is inconsistent with this folder, so the uninstall \
+                     was stopped to avoid deleting the wrong files.\n\n\
+                     Remove the application folder manually if you trust it.",
+                    "Uninstall",
+                    true,
+                );
+            }
+            return 1;
+        }
+
+        if !silent {
+            let wtext = wide(&format!(
+                "Remove {} {} from this PC?",
+                journal.app_name, journal.version
+            ));
+            let wcap = wide("Uninstall");
+            let answer = unsafe {
+                MessageBoxW(
+                    std::ptr::null_mut(),
+                    pcw(&wtext),
+                    pcw(&wcap),
+                    MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2,
+                )
+            };
+            if answer != IDYES {
+                return 0;
             }
         }
-        // The journal itself and (best effort) the now-empty folder.
+
+        // The running uninstaller cannot delete itself while it runs; the
+        // files are removed now and Windows deletes the exe at the next
+        // boot (MoveFileExW with MOVEFILE_DELAY_UNTIL_REBOOT).
+        let mut failures = rollback_journal(&journal, &journal.install_dir);
         let _ = std::fs::remove_file(&journal_path);
         let _ = std::fs::remove_dir(&dir);
         let _ = std::fs::remove_dir(&journal.install_dir);
+        let queued = schedule_delete_on_reboot(&own_exe);
+        if !queued {
+            // Point the user at the one leftover file rather than
+            // pretending the folder is gone.
+            failures.push(format!(
+                "{} could not be scheduled for deletion; delete it manually",
+                own_exe.display()
+            ));
+        }
+
         if failures.is_empty() {
             if !silent {
                 message_box(
@@ -715,7 +1363,7 @@ mod imp {
             if !silent {
                 message_box(
                     &format!(
-                        "Uninstall finished, but some files could not be removed:\n\n{}",
+                        "Uninstall finished, but some items could not be removed:\n\n{}",
                         failures.join("\n")
                     ),
                     "Uninstall",
@@ -828,12 +1476,26 @@ mod imp {
                 text.push_str("\r\n\r\nPress Next to continue.");
                 text
             }
-            Page::License => format!(
-                "Please review the license agreement before installing {}.\r\n\r\n\
-                 The full agreement ships with this package as:\r\n\r\n    {}\r\n\r\n\
-                 Press Next if you accept the agreement.",
-                cfg.app.name, cfg.install.license_file
-            ),
+            Page::License => {
+                // `license_text` is embedded by the packer; a project that
+                // only names a file (hand-edited config) falls back to a
+                // clear notice instead of showing the user a bare path.
+                let text = cfg.install.license_text.trim();
+                if text.is_empty() {
+                    format!(
+                        "{} includes a license agreement ({}), but this installer was built \
+                         without its text.\r\n\r\nPress Next if you accept the terms shipped \
+                         with {}.",
+                        cfg.app.name, cfg.install.license_file, cfg.app.name
+                    )
+                } else {
+                    format!(
+                        "License agreement for {} {}\r\n\r\n{}\r\n\r\n\
+                         Press Next if you accept the agreement.",
+                        cfg.app.name, cfg.app.version, text
+                    )
+                }
+            }
             Page::Directory => format!(
                 "Choose where to install {}.\r\n\r\n\
                  Setup will install the program into the folder below. \
@@ -868,6 +1530,7 @@ mod imp {
     const WS_TABSTOP_: u32 = 0x0001_0000;
     const WS_BORDER_: u32 = 0x0080_0000;
 
+    #[allow(clippy::too_many_arguments)] // mirrors CreateWindowExW's own signature
     unsafe fn make_child(
         parent: HWND,
         class: &str,
@@ -966,7 +1629,7 @@ mod imp {
             install_failed,
         ) = snapshot;
 
-        with_state(|s| destroy_page_controls(s));
+        with_state(destroy_page_controls);
         set_text(title, page_title(page));
         set_text(body, "");
         let _ = unsafe { KillTimer(hwnd, TIMER_TYPEWRITER) };
@@ -1271,6 +1934,11 @@ mod imp {
         let install_path = PathBuf::from(&install_dir);
         let main_exe = install_path.join(&cfg.app.main_exe);
 
+        // The journal from the install step is authoritative; the fallback
+        // only exists so a demo run still records finish-page choices. It
+        // must use the same scope the install used, or uninstall would look
+        // in the wrong ARP root.
+        let scope_label = cfg.install.scope.resolve(is_elevated()).label();
         let mut journal = with_state(|s| s.journal.take())
             .flatten()
             .unwrap_or_else(|| {
@@ -1279,22 +1947,80 @@ mod imp {
                     &cfg.app.name,
                     &cfg.app.version,
                     &install_dir,
-                    "per-user",
+                    scope_label,
                 )
             });
 
         if want_desktop && model.show_desktop_shortcut {
-            match create_shortcut(
-                &main_exe,
-                &sanitize_folder(&cfg.app.name),
+            if !main_exe.is_file() {
+                message_box(
+                    &format!(
+                        "The Desktop shortcut was skipped: {} is missing from the install folder.",
+                        main_exe.display()
+                    ),
+                    "Setup",
+                    true,
+                );
+            } else {
+                match create_shortcut(
+                    &main_exe,
+                    &sanitize_folder(&cfg.app.name),
+                    &install_path,
+                    &cfg.app.name,
+                ) {
+                    Ok(link) => journal.record(JournalAction::CreateShortcut {
+                        path: link.to_string_lossy().into_owned(),
+                    }),
+                    Err(err) => message_box(
+                        &format!("The Desktop shortcut could not be created.\n\n{err}"),
+                        "Setup",
+                        true,
+                    ),
+                }
+            }
+        }
+
+        // Project-file [[shortcuts]] (beyond the finish-page checkbox).
+        for shortcut in &cfg.shortcuts {
+            if !shortcut.location_is_supported() {
+                message_box(
+                    &format!(
+                        "Skipped shortcut '{}': location '{}' is not supported yet \
+                         (use \"desktop\" or \"start-menu\").",
+                        shortcut.name, shortcut.location
+                    ),
+                    "Setup",
+                    true,
+                );
+                continue;
+            }
+            let target = install_path.join(shortcut.target.trim());
+            if !target.is_file() {
+                message_box(
+                    &format!(
+                        "Skipped shortcut '{}': target '{}' is not installed.",
+                        shortcut.name, shortcut.target
+                    ),
+                    "Setup",
+                    true,
+                );
+                continue;
+            }
+            match create_shortcut_at(
+                shortcut.location.trim(),
+                &target,
+                shortcut.name.trim(),
                 &install_path,
-                &cfg.app.name,
+                &shortcut.arguments,
             ) {
                 Ok(link) => journal.record(JournalAction::CreateShortcut {
                     path: link.to_string_lossy().into_owned(),
                 }),
                 Err(err) => message_box(
-                    &format!("The Desktop shortcut could not be created.\n\n{err}"),
+                    &format!(
+                        "Shortcut '{}' could not be created.\n\n{err}",
+                        shortcut.name
+                    ),
                     "Setup",
                     true,
                 ),
@@ -1317,7 +2043,19 @@ mod imp {
         }
 
         let journal_path = install_path.join(JOURNAL_FILE_NAME);
-        let _ = journal.save(&journal_path);
+        if let Err(e) = journal.save(&journal_path) {
+            // Losing the journal here would leave shortcuts and Run
+            // entries that no uninstaller can ever remove.
+            message_box(
+                &format!(
+                    "The finish-page choices could not be recorded, so they were not applied.\n\n{e}"
+                ),
+                "Setup",
+                true,
+            );
+            let _ = unsafe { DestroyWindow(hwnd) };
+            return;
+        }
         with_state(|s| s.journal = Some(journal));
 
         if want_launch && model.show_launch_after_setup {
@@ -1418,12 +2156,34 @@ mod imp {
                 0
             }
             WM_KEYDOWN if wparam == VK_SPACE as usize || wparam == VK_RETURN as usize => {
-                let complete = with_state_ref(|s| s.typewriter.is_complete()).unwrap_or(true);
-                if complete {
-                    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
-                } else {
+                // Space/Enter first finish the typewriter, then advance the
+                // wizard: a keyboard-only user can complete setup without
+                // ever clicking Next. (Previously the key was swallowed by
+                // the main window and did nothing.)
+                let (complete, page, installing) = with_state(|s| {
+                    (
+                        s.typewriter.is_complete(),
+                        s.pages.get(s.page_index).copied(),
+                        s.install_done,
+                    )
+                })
+                .unwrap_or((true, None, false));
+                if !complete {
                     skip_typewriter();
-                    0
+                    return 0;
+                }
+                match page {
+                    // Enter in the folder field confirms the folder.
+                    Some(Page::Directory) | Some(Page::Welcome) | Some(Page::License) => {
+                        on_next();
+                        0
+                    }
+                    Some(Page::Finish) => {
+                        on_next();
+                        0
+                    }
+                    Some(Page::Installing) if !installing => 0,
+                    _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
                 }
             }
             WM_COMMAND => {
@@ -1484,12 +2244,7 @@ mod imp {
                     taken
                 });
                 if let Some((font, title_font, bg_brush, surface_brush)) = gdi {
-                    for obj in [
-                        font as *mut c_void,
-                        title_font as *mut c_void,
-                        bg_brush as *mut c_void,
-                        surface_brush as *mut c_void,
-                    ] {
+                    for obj in [font, title_font, bg_brush, surface_brush] {
                         if !obj.is_null() {
                             let _ = unsafe { DeleteObject(obj) };
                         }
@@ -1525,6 +2280,35 @@ mod imp {
         if uninstall_mode {
             return run_uninstall(has("--silent") || has("/silent"));
         }
+        // Per-machine installs need elevation: offer a UAC re-launch
+        // instead of failing at the first HKLM write. A per-user install
+        // never asks for (or needs) administrator rights.
+        if !is_elevated() {
+            let needs_machine = match load_config() {
+                Ok((cfg, _)) => {
+                    cfg.install.require_admin || cfg.install.scope.resolve(true).is_machine_wide()
+                }
+                Err(_) => false,
+            };
+            if needs_machine {
+                let text = wide(
+                    "This installer needs administrator rights to install for all users.\n\n\
+                     Continue and approve the Windows prompt?",
+                );
+                let cap = wide("Setup");
+                let answer = unsafe {
+                    MessageBoxW(
+                        std::ptr::null_mut(),
+                        pcw(&text),
+                        pcw(&cap),
+                        MB_YESNO | MB_ICONQUESTION,
+                    )
+                };
+                if answer == IDYES && relaunch_elevated() {
+                    return 0;
+                }
+            }
+        }
         run_wizard()
     }
 
@@ -1533,7 +2317,26 @@ mod imp {
         let _ =
             unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
 
-        let (cfg, packed) = load_config();
+        let (cfg, packed) = match load_config() {
+            Ok(v) => v,
+            Err(message) => {
+                // A packed installer that cannot read its own payload must
+                // refuse to run rather than install a placeholder.
+                message_box(
+                    &format!("{message}\n\nNo changes were made to this PC."),
+                    "Installation cannot continue",
+                    true,
+                );
+                return 3;
+            }
+        };
+        // Running-process and prerequisite checks happen before anything
+        // is written, with paged progress while the checks run.
+        if let Some(blocker) = preflight_blocker(&cfg) {
+            message_box(&blocker, "Setup cannot continue", true);
+            return 4;
+        }
+
         let mut pages = vec![Page::Welcome];
         if !cfg.install.license_file.trim().is_empty() {
             pages.push(Page::License);

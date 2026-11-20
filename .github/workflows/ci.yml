@@ -1,9 +1,34 @@
 name: CI
+
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
 jobs:
+  # Fast, platform-independent coverage: the core crate, the CLI, and its
+  # end-to-end tests all build and run on Linux. Stub/GUI are
+  # Windows-gated, so they are only *checked* here (their `cfg(not(windows))`
+  # main() compiles) and built for real in the windows job below.
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy (all targets)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test (workspace)
+        run: cargo test --workspace
+
   windows-msvc:
     runs-on: windows-latest
     steps:
@@ -11,9 +36,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
+          components: clippy
+      - name: Clippy (Windows-only crates included)
+        run: cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings
       - name: Test (host target on Windows runner)
         run: cargo test --workspace
       - name: Build release (x86_64-pc-windows-msvc, crt-static)
         run: cargo build --release --target x86_64-pc-windows-msvc --workspace
       - name: Show binaries
         run: dir target\x86_64-pc-windows-msvc\release\*.exe
+      - name: Smoke-test the CLI binary
+        run: |
+          target\x86_64-pc-windows-msvc\release\rustpacker-cli.exe init --out %TEMP%\rustpacker-ci\rustpacker.toml --force
+          target\x86_64-pc-windows-msvc\release\rustpacker-cli.exe validate %TEMP%\rustpacker-ci\rustpacker.toml

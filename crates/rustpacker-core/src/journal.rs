@@ -50,6 +50,10 @@ pub enum JournalAction {
     FileAssociation {
         extension: String,
         prog_id: String,
+        /// Whether these keys already existed before install. When
+        /// true, uninstall must not delete them (they held user data).
+        #[serde(default)]
+        previous_existed: bool,
     },
 }
 
@@ -128,16 +132,84 @@ impl InstallJournal {
         serde_json::to_string_pretty(self).map_err(|e| format!("could not serialise journal: {e}"))
     }
 
+    /// Basic sanity checks for a loaded journal. Rejects journals
+    /// from a newer schema and journals without an install directory
+    /// (which would make confinement checks meaningless).
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema_version == 0 || self.schema_version > 1 {
+            return Err(format!(
+                "install journal schema_version {} is not supported (expected 1)",
+                self.schema_version
+            ));
+        }
+        if self.install_dir.trim().is_empty() {
+            return Err("install journal has an empty install_dir".into());
+        }
+        Ok(())
+    }
+
+    /// On-disk location of an `OverwriteFile` backup, or `None` when the
+    /// recorded `backup_name` is not a bare file name.
+    ///
+    /// A tampered journal must not be able to point a restore or delete
+    /// at `..\..\Windows\System32` or an absolute path, so the name is
+    /// validated with the same rules as `app.main_exe`.
+    pub fn backup_path(&self, backup_name: &str) -> Option<std::path::PathBuf> {
+        if !crate::schema::is_bare_filename(backup_name) {
+            return None;
+        }
+        Some(std::path::Path::new(&self.install_dir).join(backup_name))
+    }
+
+    /// True when `path` is the install directory itself or strictly
+    /// inside it (lexical, case-insensitive, `/`/`\\` agnostic).
+    /// The uninstaller must refuse to act on any journal path for
+    /// which this is false.
+    pub fn is_path_confined(&self, path: &str) -> bool {
+        fn normalise(p: &str) -> String {
+            p.replace('\\', "/")
+                .trim_end_matches('/')
+                .to_ascii_lowercase()
+        }
+        let base = normalise(&self.install_dir);
+        let target = normalise(path);
+        if base.is_empty() || target.is_empty() {
+            return false;
+        }
+        target == base || target.starts_with(&format!("{base}/"))
+    }
+
     pub fn from_json(text: &str) -> Result<Self, String> {
-        serde_json::from_str(text).map_err(|e| format!("invalid install journal: {e}"))
+        let journal: InstallJournal =
+            serde_json::from_str(text).map_err(|e| format!("invalid install journal: {e}"))?;
+        journal.validate()?;
+        Ok(journal)
     }
 
     pub fn save(&self, path: &std::path::Path) -> Result<(), String> {
         let text = self.to_json()?;
-        // Atomic write: temp file in the same folder, then rename.
+        // Atomic write: temp file in the same folder, fsync, then rename.
         let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, text).map_err(|e| format!("could not write journal: {e}"))?;
-        std::fs::rename(&tmp, path).map_err(|e| format!("could not save journal: {e}"))
+        let write_result = (|| -> Result<(), String> {
+            std::fs::write(&tmp, text).map_err(|e| format!("could not write journal: {e}"))?;
+            // Best-effort durability: flush the file to disk before the
+            // rename so a crash cannot leave an empty journal behind.
+            if let Ok(file) = std::fs::OpenOptions::new().read(true).open(&tmp) {
+                let _ = file.sync_all();
+            }
+            std::fs::rename(&tmp, path).map_err(|e| format!("could not save journal: {e}"))?;
+            // Best-effort directory fsync (not available on all platforms).
+            if let Some(parent) = path.parent() {
+                if let Ok(dir) = std::fs::File::open(parent) {
+                    let _ = dir.sync_all();
+                }
+            }
+            Ok(())
+        })();
+        if write_result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        write_result
     }
 
     pub fn load(path: &std::path::Path) -> Result<Self, String> {
@@ -185,6 +257,49 @@ mod tests {
         let text = j.to_json().expect("serialise");
         let back = InstallJournal::from_json(&text).expect("parse");
         assert_eq!(back, j);
+    }
+
+    #[test]
+    fn backup_names_must_be_bare_filenames() {
+        let j = sample();
+        let ok = j
+            .backup_path("install.journal.json.abc123.bak")
+            .expect("a plain name resolves inside the install dir");
+        assert!(ok.starts_with(&j.install_dir));
+        for bad in [
+            r"..\..\Windows\System32\evil.dll",
+            r"C:\Windows\evil.dll",
+            r"sub\evil.dll",
+            "",
+            ".",
+        ] {
+            assert!(
+                j.backup_path(bad).is_none(),
+                "backup name {bad:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn confinement_check() {
+        let j = sample();
+        assert!(j.is_path_confined("C:\\Users\\x\\Programs\\MyApp"));
+        assert!(j.is_path_confined("C:\\Users\\x\\Programs\\MyApp\\MyApp.exe"));
+        assert!(j.is_path_confined("c:/users/x/programs/myapp/sub/file.txt"));
+        assert!(!j.is_path_confined("C:\\Windows\\System32\\evil.exe"));
+        assert!(!j.is_path_confined("C:\\Users\\x\\Programs\\MyApp2\\evil.exe"));
+        assert!(!j.is_path_confined(""));
+    }
+
+    #[test]
+    fn bad_journals_are_rejected() {
+        let mut j = sample();
+        j.schema_version = 99;
+        assert!(j.validate().is_err());
+        let mut j = sample();
+        j.install_dir = String::new();
+        assert!(j.validate().is_err());
+        assert!(InstallJournal::from_json("{\"schema_version\":99}").is_err());
     }
 
     #[test]

@@ -2,6 +2,7 @@
 name = "rustpacker-stub"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 description = "RustPacker generated-installer stub: compact Win32 terminal wizard."
@@ -17,9 +18,13 @@ rustpacker-core = { path = "../rustpacker-core" }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    # Required by RegCreateKeyExW (windows-sys gates it behind Security).
     "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_LibraryLoader",
     "Win32_System_Registry",
+    "Win32_System_SystemInformation",
     "Win32_System_Threading",
     "Win32_System_Com",
     "Win32_UI_Controls",

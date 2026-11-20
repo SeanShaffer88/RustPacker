@@ -23,13 +23,27 @@
 //! as the manifest instead of writing it to disk as a payload file.
 
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::io::{Read, Write};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 pub const OVERLAY_MAGIC: &[u8; 16] = b"RUSTPACKER_OVL01";
 pub const FOOTER_LEN: usize = 72;
 pub const CONFIG_ENTRY_NAME: &str = ".rustpacker/config.json";
 const DEFAULT_ZSTD_LEVEL: i32 = 3;
+/// Hard cap on the decompressed archive size. Payloads larger than this
+/// are rejected instead of being decompressed into memory (zip-bomb
+/// defence). 2 GiB is far above any realistic installer payload.
+pub const MAX_ARCHIVE_LEN: u64 = 2 * 1024 * 1024 * 1024;
+/// Hard cap on the number of entries in one archive.
+pub const MAX_FILE_COUNT: usize = 1_000_000;
+/// Maximum bytes for one path inside the archive (u16 length field).
+pub const MAX_PATH_LEN: usize = u16::MAX as usize;
+/// Maximum bytes for one stored ZIP entry (u32 length fields).
+pub const MAX_ZIP_ENTRY_LEN: usize = u32::MAX as usize;
+/// Maximum entries in one stored ZIP (u16 count fields).
+pub const MAX_ZIP_ENTRIES: usize = u16::MAX as usize;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileEntry {
@@ -59,26 +73,104 @@ pub fn sha256_hex(data: &[u8]) -> String {
     let digest = Sha256::digest(data);
     let mut out = String::with_capacity(64);
     for b in digest {
-        out.push_str(&format!("{b:02x}"));
+        // `write!` to a String cannot fail; ignore the Result.
+        let _ = write!(out, "{b:02x}");
     }
     out
 }
 
+/// True for Windows reserved device names (`CON`, `PRN`, `AUX`, `NUL`,
+/// `COM1`..`COM9`, `LPT1`..`LPT9`), with or without an extension.
+fn is_reserved_name(segment: &str) -> bool {
+    let stem = segment.split('.').next().unwrap_or(segment);
+    let upper = stem.to_ascii_uppercase();
+    matches!(
+        upper.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    )
+}
+
 /// Reject absolute paths and any `..` / root components so a crafted
 /// payload can never write outside the install directory.
+///
+/// This check is deliberately **OS-independent**: it does not rely on
+/// `Path::components()` (whose parsing of `C:/...`, UNC paths, etc.
+/// differs between Linux and Windows). It rejects:
+/// * empty paths, absolute paths, UNC paths, drive-relative paths
+///   (any `:` — covers `C:/`, `C:`, and ADS `file:stream`),
+/// * `..` segments, empty segments (`//`, leading/trailing `/`),
+/// * Windows-forbidden characters (`< > : " | ? *` and controls),
+/// * segments ending in `.` or space (Windows strips these, which
+///   would otherwise allow collisions/overwrites),
+/// * reserved device names (`CON`, `NUL`, …).
+///
+/// `.` segments are normalised away (so `./a.txt` becomes `a.txt`).
 pub fn sanitise_rel_path(path: &str) -> Result<PathBuf, String> {
     let normalised = path.replace('\\', "/");
     if normalised.is_empty() {
         return Err("payload entry has an empty path".into());
     }
-    let p = Path::new(&normalised);
+    if normalised.contains(':') {
+        return Err(format!(
+            "payload entry path contains ':' (drive/ADS not allowed): {path}"
+        ));
+    }
+    if normalised
+        .chars()
+        .any(|c| (c as u32) < 0x20 || c as u32 == 0x7f)
+    {
+        return Err(format!(
+            "payload entry path contains control characters: {path}"
+        ));
+    }
     let mut out = PathBuf::new();
-    for comp in p.components() {
-        match comp {
-            Component::Normal(part) => out.push(part),
-            Component::CurDir => {}
-            _ => return Err(format!("payload entry path escapes its root: {path}")),
+    for segment in normalised.split('/') {
+        if segment == "." {
+            continue;
         }
+        if segment.is_empty() || segment == ".." {
+            return Err(format!("payload entry path escapes its root: {path}"));
+        }
+        if segment
+            .chars()
+            .any(|c| matches!(c, '<' | '>' | '"' | '|' | '?' | '*'))
+        {
+            return Err(format!(
+                "payload entry path contains a Windows-forbidden character: {path}"
+            ));
+        }
+        if segment.ends_with('.') || segment.ends_with(' ') {
+            return Err(format!(
+                "payload entry path segment ends with '.' or space (not allowed on Windows): {path}"
+            ));
+        }
+        if is_reserved_name(segment) {
+            return Err(format!(
+                "payload entry path uses a reserved device name: {path}"
+            ));
+        }
+        out.push(segment);
     }
     if out.as_os_str().is_empty() {
         return Err(format!("payload entry has no usable path: {path}"));
@@ -86,23 +178,77 @@ pub fn sanitise_rel_path(path: &str) -> Result<PathBuf, String> {
     Ok(out)
 }
 
+/// Normalised forward-slash form of a payload path (e.g. `./a\\b.txt`
+/// becomes `a/b.txt`). Used for reserved-entry and duplicate checks and
+/// as the canonical stored form in the archive.
+pub fn normalized_rel_str(path: &str) -> Result<String, String> {
+    let sanitised = sanitise_rel_path(path)?;
+    let mut parts: Vec<String> = Vec::new();
+    for comp in sanitised.components() {
+        // `sanitise_rel_path` only ever pushes `Normal` components.
+        if let std::path::Component::Normal(part) = comp {
+            parts.push(part.to_string_lossy().into_owned());
+        }
+    }
+    if parts.is_empty() {
+        return Err(format!("payload entry has no usable path: {path}"));
+    }
+    Ok(parts.join("/"))
+}
+
+#[derive(Debug)]
 struct ArchiveFile {
     path: String,
     data: Vec<u8>,
 }
 
-fn build_archive(files: &[ArchiveFile]) -> Vec<u8> {
+/// Validate the file list that is about to be packed: every path must
+/// normalise (see [`normalized_rel_str`]) and normalised paths must be
+/// unique case-insensitively. Returns the normalised paths in the same
+/// order as `files`.
+fn validate_pack_paths(files: &[ArchiveFile], config_entry: &str) -> Result<Vec<String>, String> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out = Vec::with_capacity(files.len());
+    for f in files {
+        let norm = normalized_rel_str(&f.path)?;
+        if norm.eq_ignore_ascii_case(config_entry) {
+            return Err(format!(
+                "payload source must not contain the reserved entry {config_entry}"
+            ));
+        }
+        if !seen.insert(norm.to_ascii_lowercase()) {
+            return Err(format!("duplicate payload entry path: {}", f.path));
+        }
+        out.push(norm);
+    }
+    Ok(out)
+}
+
+fn build_archive(files: &[ArchiveFile]) -> Result<Vec<u8>, String> {
+    if files.len() > u32::MAX as usize {
+        return Err(format!(
+            "too many payload files ({} exceeds u32 range)",
+            files.len()
+        ));
+    }
     let mut out = Vec::new();
     out.extend_from_slice(&(files.len() as u32).to_le_bytes());
     for f in files {
         let path_bytes = f.path.as_bytes();
+        if path_bytes.len() > MAX_PATH_LEN {
+            return Err(format!(
+                "payload entry path is too long ({} bytes, max {MAX_PATH_LEN}): {}",
+                path_bytes.len(),
+                f.path
+            ));
+        }
         out.extend_from_slice(&(path_bytes.len() as u16).to_le_bytes());
         out.extend_from_slice(path_bytes);
         out.extend_from_slice(&(f.data.len() as u64).to_le_bytes());
         out.extend_from_slice(&Sha256::digest(&f.data));
         out.extend_from_slice(&f.data);
     }
-    out
+    Ok(out)
 }
 
 fn parse_archive(archive: &[u8]) -> Result<Vec<ArchiveFile>, String> {
@@ -111,20 +257,38 @@ fn parse_archive(archive: &[u8]) -> Result<Vec<ArchiveFile>, String> {
         pos: 0,
     };
     let count = cur.u32()? as usize;
-    let mut files = Vec::with_capacity(count.min(1_000_000));
+    if count > MAX_FILE_COUNT {
+        return Err(format!(
+            "payload archive declares too many files ({count}, max {MAX_FILE_COUNT})"
+        ));
+    }
+    let mut files = Vec::with_capacity(count);
+    // Reject duplicate paths (case-insensitively: the target filesystem
+    // is Windows, which is case-insensitive, so `A.txt`/`a.txt` would
+    // silently overwrite each other on extract).
+    let mut seen: HashSet<String> = HashSet::new();
     for _ in 0..count {
         let path_len = cur.u16()? as usize;
         let path_bytes = cur.take(path_len)?.to_vec();
         let path = String::from_utf8(path_bytes)
             .map_err(|_| "payload entry path is not UTF-8".to_string())?;
-        sanitise_rel_path(&path)?;
-        let data_len = cur.u64()? as usize;
+        let normalised = normalized_rel_str(&path)?;
+        if !seen.insert(normalised.to_ascii_lowercase()) {
+            return Err(format!("duplicate payload entry path: {path}"));
+        }
+        let data_len = usize::try_from(cur.u64()?)
+            .map_err(|_| "payload entry is larger than this host can address".to_string())?;
         let expected = cur.take(32)?.to_vec();
         let data = cur.take(data_len)?.to_vec();
         if Sha256::digest(&data).as_slice() != expected.as_slice() {
             return Err(format!("SHA-256 mismatch for payload entry {path}"));
         }
-        files.push(ArchiveFile { path, data });
+        // Store the normalised form so `./a.txt` and `a.txt` are the
+        // same entry everywhere downstream.
+        files.push(ArchiveFile {
+            path: normalised,
+            data,
+        });
     }
     Ok(files)
 }
@@ -165,33 +329,37 @@ impl<'a> Cursor<'a> {
 
 /// Append a payload built from `files` ((relative path, data) pairs) plus
 /// the project config JSON to `stub` bytes, returning the finished exe.
+///
+/// Paths are normalised (see [`normalized_rel_str`]); the reserved
+/// config entry, duplicate paths (case-insensitively, since the target
+/// filesystem is Windows), and over-long paths are rejected.
 pub fn pack_files(
     stub: &[u8],
-    mut files: Vec<(String, Vec<u8>)>,
+    files: Vec<(String, Vec<u8>)>,
     config_json: &str,
 ) -> Result<Vec<u8>, String> {
-    for (path, _) in &files {
-        sanitise_rel_path(path)?;
-        if path.replace('\\', "/") == CONFIG_ENTRY_NAME {
-            return Err(format!(
-                "payload source must not contain the reserved entry {CONFIG_ENTRY_NAME}"
-            ));
-        }
-    }
-    files.sort_by(|a, b| a.0.cmp(&b.0));
     let mut archive_files: Vec<ArchiveFile> = files
         .into_iter()
-        .map(|(path, data)| ArchiveFile {
-            path: path.replace('\\', "/"),
-            data,
-        })
+        .map(|(path, data)| ArchiveFile { path, data })
         .collect();
+    let normalised = validate_pack_paths(&archive_files, CONFIG_ENTRY_NAME)?;
+    for (file, path) in archive_files.iter_mut().zip(normalised) {
+        file.path = path;
+    }
+    // Case-insensitive sort keeps output deterministic and mirrors the
+    // Windows filesystem's view of the entry order.
+    archive_files.sort_by(|a, b| {
+        a.path
+            .to_ascii_lowercase()
+            .cmp(&b.path.to_ascii_lowercase())
+            .then_with(|| a.path.cmp(&b.path))
+    });
     archive_files.push(ArchiveFile {
         path: CONFIG_ENTRY_NAME.into(),
         data: config_json.as_bytes().to_vec(),
     });
 
-    let archive = build_archive(&archive_files);
+    let archive = build_archive(&archive_files)?;
     let archive_len = archive.len() as u64;
     let payload = zstd::encode_all(&archive[..], DEFAULT_ZSTD_LEVEL)
         .map_err(|e| format!("payload compression failed: {e}"))?;
@@ -210,6 +378,15 @@ pub fn pack_files(
 }
 
 /// Walk a source directory (sorted, deterministic) and pack it onto `stub`.
+///
+/// Symlinks are **not followed**: symlinked files and directories are
+/// skipped (the payload format has no symlink representation, and
+/// following them could pack content from outside the source tree or
+/// recurse forever on a symlink loop). Other non-regular files
+/// (FIFOs, sockets, …) are likewise skipped.
+///
+/// Note: this loads every file into memory. Very large payloads need
+/// proportionally large amounts of RAM; see the module docs.
 pub fn pack_directory(
     stub: &[u8],
     source_dir: &Path,
@@ -222,7 +399,7 @@ pub fn pack_directory(
         ));
     }
     let mut paths: Vec<PathBuf> = Vec::new();
-    collect_files(source_dir, source_dir, &mut paths)?;
+    collect_files(source_dir, &mut paths)?;
     paths.sort();
     let mut files = Vec::new();
     let mut entries = Vec::new();
@@ -245,7 +422,7 @@ pub fn pack_directory(
     Ok((exe, entries))
 }
 
-fn collect_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
     let mut read = std::fs::read_dir(dir)
         .map_err(|e| format!("could not list {}: {e}", dir.display()))?
         .collect::<Result<Vec<_>, _>>()
@@ -253,12 +430,19 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), 
     read.sort_by_key(|e| e.file_name());
     for entry in read {
         let path = entry.path();
-        let _ = root;
-        if path.is_dir() {
-            collect_files(root, &path, out)?;
-        } else if path.is_file() {
+        // Use symlink_metadata so symlinks are never followed.
+        let meta = std::fs::symlink_metadata(&path)
+            .map_err(|e| format!("could not stat {}: {e}", path.display()))?;
+        let file_type = meta.file_type();
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            collect_files(&path, out)?;
+        } else if file_type.is_file() {
             out.push(path);
         }
+        // Anything else (FIFO, socket, …) is skipped.
     }
     Ok(())
 }
@@ -275,12 +459,21 @@ pub fn find_payload(exe: &[u8]) -> Result<PackedInfo, String> {
     let payload_offset = u64::from_le_bytes(footer[16..24].try_into().map_err(|_| "bad footer")?);
     let payload_len = u64::from_le_bytes(footer[24..32].try_into().map_err(|_| "bad footer")?);
     let archive_len = u64::from_le_bytes(footer[64..72].try_into().map_err(|_| "bad footer")?);
+    // Use checked conversions so a hostile footer cannot truncate on
+    // 32-bit hosts or overflow the slice arithmetic.
     let end = payload_offset
         .checked_add(payload_len)
-        .filter(|e| *e as usize == exe.len() - FOOTER_LEN)
-        .ok_or("payload bounds in footer do not match the file size")?;
-    let _ = end;
-    let payload = &exe[payload_offset as usize..(payload_offset + payload_len) as usize];
+        .ok_or("payload bounds in footer overflow")?;
+    let end_usize =
+        usize::try_from(end).map_err(|_| "payload bounds in footer do not match the file size")?;
+    if end_usize != exe.len() - FOOTER_LEN {
+        return Err("payload bounds in footer do not match the file size".into());
+    }
+    let offset_usize = usize::try_from(payload_offset)
+        .map_err(|_| "payload bounds in footer do not match the file size")?;
+    let len_usize = usize::try_from(payload_len)
+        .map_err(|_| "payload bounds in footer do not match the file size")?;
+    let payload = &exe[offset_usize..offset_usize + len_usize];
     if Sha256::digest(payload).as_slice() != &footer[32..64] {
         return Err("payload SHA-256 mismatch — the file is corrupt or was modified".into());
     }
@@ -294,12 +487,31 @@ pub fn find_payload(exe: &[u8]) -> Result<PackedInfo, String> {
 
 fn decode_payload(exe: &[u8]) -> Result<Vec<ArchiveFile>, String> {
     let info = find_payload(exe)?;
-    let payload =
-        &exe[info.payload_offset as usize..(info.payload_offset + info.payload_len) as usize];
-    let mut decoder =
+    // Reject absurd archive sizes before allocating anything. The
+    // footer is attacker-controlled until the payload hash verifies,
+    // and `find_payload` has already verified that hash — but a
+    // *validly hashed* bomb (crafted by whoever packed the file) must
+    // still not OOM the extractor.
+    if info.archive_len > MAX_ARCHIVE_LEN {
+        return Err(format!(
+            "payload archive is too large ({} bytes, max {MAX_ARCHIVE_LEN})",
+            info.archive_len
+        ));
+    }
+    let offset_usize = usize::try_from(info.payload_offset)
+        .map_err(|_| "payload bounds in footer do not match the file size")?;
+    let len_usize = usize::try_from(info.payload_len)
+        .map_err(|_| "payload bounds in footer do not match the file size")?;
+    let payload = &exe[offset_usize..offset_usize + len_usize];
+    let decoder =
         zstd::Decoder::new(payload).map_err(|e| format!("payload decompression failed: {e}"))?;
-    let mut archive = Vec::with_capacity(info.archive_len as usize);
+    // Pre-allocate only a bounded chunk; the `take` limit below is the
+    // real guard against decompression bombs.
+    let initial_cap = usize::try_from(info.archive_len.min(16 * 1024 * 1024)).unwrap_or(0);
+    let mut archive = Vec::with_capacity(initial_cap);
+    let limit = info.archive_len.saturating_add(1);
     decoder
+        .take(limit)
         .read_to_end(&mut archive)
         .map_err(|e| format!("payload decompression failed: {e}"))?;
     if archive.len() as u64 != info.archive_len {
@@ -340,8 +552,18 @@ pub fn verify_payload(exe: &[u8]) -> Result<PayloadManifest, String> {
 
 /// Extract every payload file under `dest_dir`. The embedded config entry
 /// is not written to disk. Returns the extracted relative paths.
+///
+/// Extraction is symlink-safe: the destination is canonicalised after
+/// creation, every parent directory is verified to stay inside it, and
+/// a pre-existing symlink at the target path is rejected. A payload
+/// (or a pre-seeded destination) therefore cannot write outside
+/// `dest_dir` via `..`, absolute paths, or symlinks.
 pub fn extract_payload(exe: &[u8], dest_dir: &Path) -> Result<Vec<String>, String> {
     let files = decode_payload(exe)?;
+    std::fs::create_dir_all(dest_dir)
+        .map_err(|e| format!("could not create {}: {e}", dest_dir.display()))?;
+    let dest_canonical = std::fs::canonicalize(dest_dir)
+        .map_err(|e| format!("could not resolve {}: {e}", dest_dir.display()))?;
     let mut extracted = Vec::new();
     for f in files {
         if f.path == CONFIG_ENTRY_NAME {
@@ -352,6 +574,23 @@ pub fn extract_payload(exe: &[u8], dest_dir: &Path) -> Result<Vec<String>, Strin
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
+            let parent_canonical = std::fs::canonicalize(parent)
+                .map_err(|e| format!("could not resolve {}: {e}", parent.display()))?;
+            if !parent_canonical.starts_with(&dest_canonical) {
+                return Err(format!(
+                    "payload entry would escape the destination directory: {}",
+                    f.path
+                ));
+            }
+        }
+        // Never write through a pre-existing symlink at the target.
+        if let Ok(meta) = std::fs::symlink_metadata(&target) {
+            if meta.file_type().is_symlink() {
+                return Err(format!(
+                    "refusing to write through a symlink: {}",
+                    target.display()
+                ));
+            }
         }
         let mut file = std::fs::File::create(&target)
             .map_err(|e| format!("could not create {}: {e}", target.display()))?;
@@ -374,14 +613,52 @@ pub fn sha256sums_txt(items: &[(&str, &[u8])]) -> String {
 /// Write stored (uncompressed) ZIP entries — the portable export. ZIP is
 /// written by hand so the packer needs no extra dependency; entries use
 /// the standard stored method with a correct CRC-32.
-pub fn write_stored_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+///
+/// Returns an error instead of silently truncating when an entry name,
+/// entry size, offset, or entry count exceeds the ZIP field widths
+/// (u16/u32). ZIP64 is not supported; payloads needing it must be
+/// split or the portable export omitted.
+pub fn write_stored_zip(entries: &[(&str, &[u8])]) -> Result<Vec<u8>, String> {
+    if entries.len() > MAX_ZIP_ENTRIES {
+        return Err(format!(
+            "too many portable ZIP entries ({} exceeds u16 range)",
+            entries.len()
+        ));
+    }
     let mut out: Vec<u8> = Vec::new();
     let mut central: Vec<u8> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
     for (name, data) in entries {
-        let name_bytes = name.replace('\\', "/");
-        let name_bytes = name_bytes.as_bytes();
+        // Portable ZIPs are unpacked on Windows: apply the same path
+        // rules as the payload so a hostile or sloppy project cannot
+        // ship traversal or reserved names inside the ZIP.
+        let normalised = normalized_rel_str(name)?;
+        if !seen.insert(normalised.to_ascii_lowercase()) {
+            return Err(format!("duplicate portable ZIP entry: {normalised}"));
+        }
+        let name_bytes = normalised.as_bytes();
+        if name_bytes.len() > MAX_PATH_LEN {
+            return Err(format!(
+                "portable ZIP entry name is too long ({} bytes, max {MAX_PATH_LEN}): {name}",
+                name_bytes.len()
+            ));
+        }
+        if data.len() > MAX_ZIP_ENTRY_LEN {
+            return Err(format!(
+                "portable ZIP entry is too large ({} bytes, max {MAX_ZIP_ENTRY_LEN}): {name}",
+                data.len()
+            ));
+        }
+        if out.len() > MAX_ZIP_ENTRY_LEN {
+            return Err("portable ZIP is too large (offset exceeds u32 range)".into());
+        }
         let crc = crc32(data);
-        let offset = out.len() as u32;
+        let data_len_u32 = u32::try_from(data.len())
+            .map_err(|_| format!("portable ZIP entry is too large: {normalised}"))?;
+        let name_len_u16 = u16::try_from(name_bytes.len())
+            .map_err(|_| format!("portable ZIP entry name is too long: {normalised}"))?;
+        let offset = u32::try_from(out.len())
+            .map_err(|_| "portable ZIP is too large (offset exceeds u32 range)".to_string())?;
         out.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
         out.extend_from_slice(&20u16.to_le_bytes()); // version needed
         out.extend_from_slice(&0x0800u16.to_le_bytes()); // UTF-8 flag
@@ -389,9 +666,9 @@ pub fn write_stored_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
         out.extend_from_slice(&0u16.to_le_bytes()); // time
         out.extend_from_slice(&0x21u16.to_le_bytes()); // date 1980-01-01
         out.extend_from_slice(&crc.to_le_bytes());
-        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
-        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
-        out.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
+        out.extend_from_slice(&data_len_u32.to_le_bytes());
+        out.extend_from_slice(&data_len_u32.to_le_bytes());
+        out.extend_from_slice(&name_len_u16.to_le_bytes());
         out.extend_from_slice(&0u16.to_le_bytes()); // extra len
         out.extend_from_slice(name_bytes);
         out.extend_from_slice(data);
@@ -404,9 +681,9 @@ pub fn write_stored_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
         central.extend_from_slice(&0u16.to_le_bytes());
         central.extend_from_slice(&0x21u16.to_le_bytes());
         central.extend_from_slice(&crc.to_le_bytes());
-        central.extend_from_slice(&(data.len() as u32).to_le_bytes());
-        central.extend_from_slice(&(data.len() as u32).to_le_bytes());
-        central.extend_from_slice(&(name_bytes.len() as u16).to_le_bytes());
+        central.extend_from_slice(&data_len_u32.to_le_bytes());
+        central.extend_from_slice(&data_len_u32.to_le_bytes());
+        central.extend_from_slice(&name_len_u16.to_le_bytes());
         central.extend_from_slice(&0u16.to_le_bytes()); // extra
         central.extend_from_slice(&0u16.to_le_bytes()); // comment
         central.extend_from_slice(&0u16.to_le_bytes()); // disk
@@ -415,33 +692,45 @@ pub fn write_stored_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
         central.extend_from_slice(&offset.to_le_bytes());
         central.extend_from_slice(name_bytes);
     }
-    let central_offset = out.len() as u32;
-    let central_len = central.len() as u32;
+    if out.len() > MAX_ZIP_ENTRY_LEN || central.len() > MAX_ZIP_ENTRY_LEN {
+        return Err("portable ZIP is too large (central directory exceeds u32 range)".into());
+    }
+    let central_offset = u32::try_from(out.len())
+        .map_err(|_| "portable ZIP is too large (offset exceeds u32 range)".to_string())?;
+    let central_len = u32::try_from(central.len()).map_err(|_| {
+        "portable ZIP is too large (central directory exceeds u32 range)".to_string()
+    })?;
+    let entry_count = u16::try_from(entries.len())
+        .map_err(|_| "too many portable ZIP entries (exceeds u16 range)".to_string())?;
     out.extend_from_slice(&central);
     out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
     out.extend_from_slice(&0u16.to_le_bytes());
     out.extend_from_slice(&0u16.to_le_bytes());
-    out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
-    out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+    out.extend_from_slice(&entry_count.to_le_bytes());
+    out.extend_from_slice(&entry_count.to_le_bytes());
     out.extend_from_slice(&central_len.to_le_bytes());
     out.extend_from_slice(&central_offset.to_le_bytes());
     out.extend_from_slice(&0u16.to_le_bytes());
-    out
+    Ok(out)
 }
 
 fn crc32(data: &[u8]) -> u32 {
-    let mut table = [0u32; 256];
-    for (i, slot) in table.iter_mut().enumerate() {
-        let mut c = i as u32;
-        for _ in 0..8 {
-            c = if c & 1 != 0 {
-                0xEDB8_8320 ^ (c >> 1)
-            } else {
-                c >> 1
-            };
+    static TABLE: std::sync::OnceLock<[u32; 256]> = std::sync::OnceLock::new();
+    let table = TABLE.get_or_init(|| {
+        let mut table = [0u32; 256];
+        for (i, slot) in table.iter_mut().enumerate() {
+            let mut c = i as u32;
+            for _ in 0..8 {
+                c = if c & 1 != 0 {
+                    0xEDB8_8320 ^ (c >> 1)
+                } else {
+                    c >> 1
+                };
+            }
+            *slot = c;
         }
-        *slot = c;
-    }
+        table
+    });
     let mut crc = 0xFFFF_FFFFu32;
     for &b in data {
         crc = table[((crc ^ b as u32) & 0xFF) as usize] ^ (crc >> 8);
@@ -541,10 +830,188 @@ mod tests {
 
     #[test]
     fn stored_zip_has_valid_structure() {
-        let zip = write_stored_zip(&[("a.txt", b"abc"), ("b/c.txt", b"defg")]);
+        let zip = write_stored_zip(&[("a.txt", b"abc"), ("b/c.txt", b"defg")]).expect("zip");
         assert_eq!(&zip[0..4], b"PK\x03\x04");
         // End-of-central-directory signature present near the tail.
         assert!(zip.windows(4).any(|w| w == b"PK\x05\x06"));
         assert_eq!(crc32(b"abc"), 0x3524_41C2);
+    }
+
+    #[test]
+    fn windows_specific_paths_are_rejected_on_any_host() {
+        // Drive, UNC, ADS, reserved names, trailing dot/space, and
+        // forbidden characters must be rejected even on Linux, where
+        // `Path::components()` alone would accept them.
+        for bad in [
+            "C:/evil.exe",
+            "C:evil.exe",
+            "C:\\evil.exe",
+            "//server/share/evil",
+            "file.txt:stream",
+            "CON",
+            "con.txt",
+            "NUL",
+            "COM1",
+            "a/file.txt.",
+            "a/file.txt ",
+            "a/b<c.txt",
+            "a/b|c.txt",
+            "a//b.txt",
+            "a/b.txt/",
+        ] {
+            assert!(
+                sanitise_rel_path(bad).is_err(),
+                "expected rejection for {bad:?}, got Ok"
+            );
+        }
+        // Normalisation: `./` and backslashes collapse to the canonical form.
+        assert_eq!(
+            normalized_rel_str("./a\\b.txt").expect("normalise"),
+            "a/b.txt"
+        );
+        assert_eq!(
+            normalized_rel_str("a/./b.txt").expect("normalise"),
+            "a/b.txt"
+        );
+    }
+
+    #[test]
+    fn reserved_entry_bypass_and_duplicates_are_rejected() {
+        // `./` prefix must not bypass the reserved-entry check.
+        assert!(pack_files(
+            &stub(),
+            vec![("./.rustpacker/config.json".into(), b"x".to_vec())],
+            "{}"
+        )
+        .is_err());
+        assert!(pack_files(
+            &stub(),
+            vec![(".rustpacker\\config.json".into(), b"x".to_vec())],
+            "{}"
+        )
+        .is_err());
+        // Exact and case-insensitive duplicates are rejected.
+        assert!(pack_files(
+            &stub(),
+            vec![
+                ("a.txt".into(), b"1".to_vec()),
+                ("a.txt".into(), b"2".to_vec()),
+            ],
+            "{}"
+        )
+        .is_err());
+        assert!(pack_files(
+            &stub(),
+            vec![
+                ("A.txt".into(), b"1".to_vec()),
+                ("a.txt".into(), b"2".to_vec()),
+            ],
+            "{}"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn lying_footer_archive_len_is_rejected() {
+        // A footer claiming an absurd archive length must be rejected
+        // without attempting a huge allocation.
+        let mut exe =
+            pack_files(&stub(), vec![("a.txt".into(), b"data".to_vec())], "{}").expect("pack");
+        // Overwrite archive_len (last 8 bytes) with a huge value and
+        // fix up nothing else: `find_payload` still passes (it only
+        // checks offset/len/hash), but decode must reject the size.
+        let huge = (MAX_ARCHIVE_LEN + 1).to_le_bytes();
+        let n = exe.len();
+        exe[n - 8..n].copy_from_slice(&huge);
+        assert!(read_manifest(&exe).is_err());
+        // A moderately lying (but under-cap) length must also fail the
+        // exact-length check after bounded decompression.
+        let mut exe2 =
+            pack_files(&stub(), vec![("a.txt".into(), b"data".to_vec())], "{}").expect("pack");
+        let n2 = exe2.len();
+        // Read the real archive_len, add 1, write it back. The payload
+        // hash covers only the payload bytes, not the footer, so this
+        // stays "valid" until the length check.
+        let real = u64::from_le_bytes(exe2[n2 - 8..n2].try_into().expect("footer"));
+        exe2[n2 - 8..n2].copy_from_slice(&(real + 1).to_le_bytes());
+        assert!(read_manifest(&exe2).is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn extract_refuses_symlink_escape() {
+        let exe = pack_files(
+            &stub(),
+            vec![("sub/file.txt".into(), b"payload".to_vec())],
+            "{}",
+        )
+        .expect("pack");
+        let base =
+            std::env::temp_dir().join(format!("rustpacker-symlink-test-{}", std::process::id()));
+        let outside = base.join("outside");
+        let dest = base.join("dest");
+        std::fs::create_dir_all(&outside).expect("mkdir outside");
+        std::fs::create_dir_all(&dest).expect("mkdir dest");
+        // Pre-seed dest/sub as a symlink to outside.
+        std::os::unix::fs::symlink(&outside, dest.join("sub")).expect("symlink");
+        assert!(extract_payload(&exe, &dest).is_err());
+        assert!(
+            !outside.join("file.txt").exists(),
+            "payload must not escape via symlink"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn zip_rejects_traversal_and_duplicate_names() {
+        assert!(write_stored_zip(&[("../evil.txt", b"x")]).is_err());
+        assert!(write_stored_zip(&[("C:/evil.txt", b"x")]).is_err());
+        assert!(write_stored_zip(&[("a.txt", b"x"), ("A.TXT", b"y")]).is_err());
+        assert!(write_stored_zip(&[("CON", b"x")]).is_err());
+    }
+
+    #[test]
+    fn zip_entry_names_are_normalised() {
+        let zip = write_stored_zip(&[("./a\\b.txt", b"x")]).expect("zip");
+        // The stored name is the canonical forward-slash form.
+        assert!(
+            zip.windows(5).any(|w| w == b"a/b.t"),
+            "zip should store a/b.txt"
+        );
+    }
+
+    #[test]
+    fn archive_with_too_many_entries_is_rejected() {
+        // A header claiming more files than the payload contains must fail
+        // with a clean error instead of allocating for the claimed count.
+        let mut archive = Vec::new();
+        archive.extend_from_slice(&(MAX_FILE_COUNT as u32 + 1).to_le_bytes());
+        let err = parse_archive(&archive).expect_err("must reject");
+        assert!(err.contains("too many files"), "{err}");
+    }
+
+    #[test]
+    fn truncated_archive_entry_is_rejected() {
+        let mut archive = Vec::new();
+        archive.extend_from_slice(&1u32.to_le_bytes()); // one file
+        archive.extend_from_slice(&5u16.to_le_bytes()); // path length 5
+        archive.extend_from_slice(b"a.txt"); // only 5 of 5, then nothing
+        assert!(parse_archive(&archive).is_err());
+    }
+
+    #[test]
+    fn pack_rejects_missing_reserved_and_roundtrips_config() {
+        let exe = pack_files(
+            &stub(),
+            vec![("a.txt".into(), b"hello".to_vec())],
+            "{\"k\":1}",
+        )
+        .expect("pack");
+        let manifest = read_manifest(&exe).expect("manifest");
+        assert_eq!(manifest.files.len(), 1);
+        assert_eq!(manifest.config_json.as_deref(), Some("{\"k\":1}"));
+        assert_eq!(manifest.files[0].path, "a.txt");
+        assert_eq!(manifest.files[0].size, 5);
+        assert_eq!(manifest.files[0].sha256_hex, sha256_hex(b"hello"));
     }
 }
