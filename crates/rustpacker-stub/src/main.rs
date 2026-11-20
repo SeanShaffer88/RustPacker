@@ -76,9 +76,9 @@ mod imp {
         EnableWindow, SetFocus, VK_RETURN, VK_SPACE,
     };
     use windows_sys::Win32::UI::Shell::{
-        SHCreateItemFromParsingName, SHGetFolderPathW, ShellExecuteW, FileOpenDialog,
+        FileOpenDialog, IShellItem, SHCreateItemFromParsingName, SHGetFolderPathW, ShellExecuteW,
         CSIDL_DESKTOPDIRECTORY, CSIDL_PROGRAMS, FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST,
-        FOS_PICKFOLDERS, IShellItem, SIGDN_FILESYSPATH,
+        FOS_PICKFOLDERS, SIGDN_FILESYSPATH,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
@@ -859,41 +859,50 @@ mod imp {
     /// `IFileDialog`'s vtable, in declaration order.
     ///
     /// `IFileOpenDialog` derives from `IFileDialog`, which derives from
-    /// `IModalWindow` (`Show`), which derives from `IUnknown`. The order here
-    /// is the `shobjidl_core.h` order exactly — `IFileDialog` has **no**
-    /// `GetFileTypes`, only `SetFileTypes`/`SetFileTypeIndex`/`GetFileTypeIndex`
-    /// — because a single misplaced slot would call the wrong function.
-    /// Only `SetOptions`, `SetTitle`, `SetFolder`, `Show` and `GetResult` are
-    /// typed; the rest are opaque placeholders.
+    /// `IModalWindow` (`Show`), which derives from `IUnknown`. The slot order
+    /// below is the `shobjidl_core.h` order exactly, because a single
+    /// misplaced entry would call the wrong function with the wrong arguments.
+    ///
+    /// `IModalWindow`: `show`.
+    ///
+    /// `IFileDialog`: `set_file_types`, `set_file_type_index`,
+    /// `get_file_type_index`, `advise`, `unadvise`, `set_options`,
+    /// `get_options`, `set_default_folder`, `set_folder`, `get_folder`,
+    /// `get_current_selection`, `set_file_name`, `get_file_name`, `set_title`,
+    /// `set_ok_button_label`, `set_file_name_label`, `get_result`, `add_place`,
+    /// `set_default_extension`, `close`, `set_client_guid`,
+    /// `clear_client_data`, `set_filter`. There is deliberately no
+    /// `get_file_types`: `IFileDialog` has no such method.
+    ///
+    /// Only the five entries the picker calls are typed; the rest are opaque
+    /// placeholder slots.
     #[repr(C)]
     struct IFileOpenDialogVtbl {
         base: IUnknownVtbl,
-        // IModalWindow
         show: unsafe extern "system" fn(*mut c_void, HWND) -> HRESULT,
-        // IFileDialog, 1..=23
-        set_file_types: *const c_void, // 1
-        set_file_type_index: *const c_void, // 2
-        get_file_type_index: *const c_void, // 3
-        advise: *const c_void,         // 4
-        unadvise: *const c_void,       // 5
-        set_options: unsafe extern "system" fn(*mut c_void, u32) -> HRESULT, // 6
-        get_options: *const c_void,    // 7
-        set_default_folder: *const c_void, // 8
-        set_folder: unsafe extern "system" fn(*mut c_void, *mut c_void) -> HRESULT, // 9
-        get_folder: *const c_void,     // 10
-        get_current_selection: *const c_void, // 11
-        set_file_name: *const c_void,  // 12
-        get_file_name: *const c_void,  // 13
-        set_title: unsafe extern "system" fn(*mut c_void, PCWSTR) -> HRESULT, // 14
-        set_ok_button_label: *const c_void, // 15
-        set_file_name_label: *const c_void, // 16
-        get_result: unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT, // 17
-        add_place: *const c_void,      // 18
-        set_default_extension: *const c_void, // 19
-        close: *const c_void,          // 20
-        set_client_guid: *const c_void, // 21
-        clear_client_data: *const c_void, // 22
-        set_filter: *const c_void,     // 23
+        set_file_types: *const c_void,
+        set_file_type_index: *const c_void,
+        get_file_type_index: *const c_void,
+        advise: *const c_void,
+        unadvise: *const c_void,
+        set_options: unsafe extern "system" fn(*mut c_void, u32) -> HRESULT,
+        get_options: *const c_void,
+        set_default_folder: *const c_void,
+        set_folder: unsafe extern "system" fn(*mut c_void, *mut c_void) -> HRESULT,
+        get_folder: *const c_void,
+        get_current_selection: *const c_void,
+        set_file_name: *const c_void,
+        get_file_name: *const c_void,
+        set_title: unsafe extern "system" fn(*mut c_void, PCWSTR) -> HRESULT,
+        set_ok_button_label: *const c_void,
+        set_file_name_label: *const c_void,
+        get_result: unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT,
+        add_place: *const c_void,
+        set_default_extension: *const c_void,
+        close: *const c_void,
+        set_client_guid: *const c_void,
+        clear_client_data: *const c_void,
+        set_filter: *const c_void,
     }
 
     // IShellItem: IUnknown + BindToHandler, GetParent, GetDisplayName,
@@ -903,8 +912,7 @@ mod imp {
         base: IUnknownVtbl,
         bind_to_handler: *const c_void,
         get_parent: *const c_void,
-        get_display_name:
-            unsafe extern "system" fn(*mut c_void, u32, *mut *mut u16) -> HRESULT,
+        get_display_name: unsafe extern "system" fn(*mut c_void, u32, *mut *mut u16) -> HRESULT,
         get_attributes: *const c_void,
         compare: *const c_void,
     }
@@ -1114,7 +1122,10 @@ mod imp {
             let options = FOS_PICKFOLDERS | FOS_PATHMUSTEXIST | FOS_FORCEFILESYSTEM;
             let hr = ((*vtbl).set_options)(dialog, options);
             if hr < 0 {
-                return Err(format!("the folder picker could not be configured (0x{:08x})", hr as u32));
+                return Err(format!(
+                    "the folder picker could not be configured (0x{:08x})",
+                    hr as u32
+                ));
             }
             let wtitle = wide(title);
             let _ = ((*vtbl).set_title)(dialog, pcw(&wtitle));

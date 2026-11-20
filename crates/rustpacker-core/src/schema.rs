@@ -1165,9 +1165,10 @@ mod tests {
             assert!(
                 // Not `contains([..])`: an array of chars as a `Pattern`
                 // needs Rust 1.71 and the MSRV is 1.70.
-                !out
-                    .chars()
-                    .any(|c| matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')),
+                !out.chars().any(|c| matches!(
+                    c,
+                    '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'
+                )),
                 "{raw:?} -> {out:?} still has a forbidden character"
             );
             assert!(
