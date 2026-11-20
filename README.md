@@ -11,9 +11,10 @@ or WebView2 runtime.
 
 ## What it does
 
-- **Builder Studio (`rustpacker-gui`)** — dark One Dark Pro studio with
-  collapsible side panels and a live preview of the installer wizard,
-  including the finish page exactly as the end user will see it.
+- **Builder Studio (`rustpacker-gui`)** — dark One Dark Pro studio with a
+  menu bar, toolbar, grouped section navigation and a per-section editor,
+  plus a live preview of the installer wizard, including the finish page
+  exactly as the end user will see it.
 - **CLI (`rustpacker-cli`)** — every capability from the command line:
   `init`, `validate`, `pack`, `verify`, `list`, `extract`, `schema`, with
   `--json` output and deterministic exit codes (0 ok, 2 usage,

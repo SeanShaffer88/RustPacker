@@ -82,6 +82,10 @@ or **n/a** in the Result column.
 | F3 | Tick "Also build portable .zip" and Build | `Setup.exe`, `<App>-v<version>-Portable.zip` and a `SHA256SUMS.txt` covering **both** appear in the output folder; status reports both hashes | |
 | F4 | Unzip the portable build | Payload files plus `rustpacker-portable.txt`; the exe runs from the unzipped folder | |
 | F5 | Build with an app name containing `\` or `:` (e.g. `A/B`) | Output names are sanitised identically to the CLI's — no stray subfolders | |
+| F6 | Switch between editor pages (Application, Install settings, Shortcuts, …) with unsaved edits | No edit is lost; each page shows its own fields and the centre title/hint updates | |
+| F7 | Add, edit and remove a shortcut, a registry entry, a file association, a prerequisite and a process check; save and reload the project | All entries survive the round-trip in the project file, and Validate flags a deliberately broken entry | |
+| F8 | Collapse navigation groups, hide the navigation and preview panels, resize the window | Layout stays usable down to the minimum size; nothing overlaps or disappears | |
+| F9 | Use the menu bar (File → New/Open/Save, Build → Validate/Build, Help → About) | Same behaviour as the toolbar buttons; About shows the Studio version | |
 
 ## G. Failure honesty
 
