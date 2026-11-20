@@ -1,0 +1,9 @@
+# Pin the compiler so CI, releases and local builds all use the same
+# toolchain (AUDIT L9: floating `stable` made builds non-reproducible and
+# let new clippy lints arrive unannounced). Bump this deliberately, in the
+# same commit as any fixes the newer compiler requires.
+#
+# This is the *build* toolchain, not the MSRV: the workspace still supports
+# rustc 1.70 (`rust-version` in Cargo.toml), and nothing here changes that.
+[toolchain]
+channel = "1.100.0"

@@ -36,8 +36,10 @@ jobs:
           ref: ${{ github.event.inputs.tag || github.ref }}
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Same pinned toolchain as CI (see rust-toolchain.toml).
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.100.0"
           targets: x86_64-pc-windows-msvc
 
       - name: Resolve and verify the version

@@ -6,15 +6,81 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.2.0] - 2026-11-20
+
+The audit-closure release: every P1 item in `AUDIT.md` is now implemented,
+and the CLI and Builder Studio produce identical outputs from shared core
+code.
+
 ### Added
 
-- **Builder Studio: portable ZIP builds.** An "Also build portable .zip"
-  option next to the finish-page options produces
-  `<App>-v<version>-Portable.zip` alongside `Setup.exe`, covered by the
-  same `SHA256SUMS.txt`. The export is assembled by core
-  `build_portable_zip` — the same function the CLI's `--portable` calls,
-  fed by the same pack manifest — so both surfaces ship identical ZIPs
-  (AUDIT M14).
+- **Install log (AUDIT M7).** Every install writes `install.log` beside the
+  journal: a header and footer around one timestamped line per step,
+  rotated to `.1` past 256 KiB. Logging is best-effort — a log failure can
+  never fail the install — so a field failure finally leaves something
+  behind to diagnose.
+- **Wizard confirmations (AUDIT M7).** Cancelling the wizard and running
+  the uninstaller ask first (both skipped under `--silent`), instead of
+  destroying the wizard or deleting everything without a prompt.
+- **Folder Browse and validation (AUDIT M11).** The directory page has a
+  Browse button (`IFileOpenDialog`), and the chosen folder is validated
+  by core `validate_install_dir`: absolute, no device paths or drive
+  roots, no `.`/`..` components, per-component and total length limits,
+  no reserved device stems, and never a Windows system root.
+- **Builder Studio: portable ZIP builds (AUDIT M14).** An "Also build
+  portable .zip" option produces `<App>-v<version>-Portable.zip`
+  alongside `Setup.exe`, covered by the same `SHA256SUMS.txt`. The
+  export is assembled by core `build_portable_zip` — the same function
+  the CLI's `--portable` calls, fed by the same pack manifest — so both
+  surfaces ship identical ZIPs.
+- **Documentation.** `docs/payload-format.md` specifies the overlay
+  footer, archive layout and portable ZIP; `CONTRIBUTING.md` records
+  the build/check commands, the MSRV policy and the release process.
+
+### Changed
+
+- **One file-name sanitiser everywhere (AUDIT M13).** Core
+  `safe_file_name` now names folders, shortcuts and output files on all
+  three surfaces: forbidden/control characters replaced, dots and
+  whitespace trimmed from both ends, reserved device stems `_`-prefixed,
+  result bounded to 120 characters.
+- **Finish-page choices survive (AUDIT L6).** The Builder Studio preview
+  no longer re-seeds its checkboxes when the finish model changes state
+  moved to core `FinishSelection`, which remembers what the user has
+  seen: unseen options carry the project default, seen ones keep the
+  user's choice, and hide/show is lossless.
+- **Transactional pack outputs (AUDIT L4).** `pack` writes its outputs
+  through temp-file + rename with rollback, checksums last, so a failed
+  write cannot leave a `Setup.exe` whose `SHA256SUMS.txt` vouches for
+  different bytes.
+- **Smaller uninstaller (AUDIT L16).** `Uninstall.exe` is written with
+  the payload stripped instead of copying the whole installer.
+- **Pinned toolchain (AUDIT L9).** CI, releases and local builds use
+  Rust 1.100.0 (`rust-toolchain.toml`); the MSRV stays 1.70.
+
+### Fixed
+
+- **Finish-page edge cases (AUDIT L17).** A whitespace-only
+  `startup_tray_arg` now falls back to `tray_arg` instead of silently
+  dropping the tray argument, and quote-leading argument fragments are
+  rejected rather than embedded into the login `Run` value. New tests
+  pin the whole `launch_args`/`login_command` edge matrix.
+- Assorted hot-path waste (AUDIT L1): the CRC-32 table is built once,
+  hex encoding uses a lookup table, and the wizard redraws its
+  typewriter text into a reused buffer.
+
+### Known limitations
+
+- **Windows runtime behaviour is verified by inspection only.** CI
+  compiles, lints, tests and packages these binaries, but never opens
+  the wizard or the Builder Studio. They still need a pass on a real
+  Windows 11 host (`AUDIT.md` §10 item 10).
+- Windows 11 x64 only (`min_windows_build = 22000`); no ARM64 or 32-bit
+  builds.
+- `examples/demo/payload/DemoApp.exe` is a text placeholder, not a real
+  executable, so the demo installs a file that will not launch.
 
 ## [0.1.0] - 2026-11-19
 
@@ -94,5 +160,6 @@ in this release:
 - `examples/demo/payload/DemoApp.exe` is a text placeholder, not a real
   executable, so the demo installs a file that will not launch.
 
-[Unreleased]: https://github.com/SeanShaffer88/RustPacker/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/SeanShaffer88/RustPacker/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/SeanShaffer88/RustPacker/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/SeanShaffer88/RustPacker/releases/tag/v0.1.0

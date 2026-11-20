@@ -11,9 +11,11 @@ RustPacker is a four-crate Cargo workspace:
 
 ## Building and checking
 
-You need a stable Rust toolchain. The MSRV is **1.70** (`rust-version` in
+You need Rust; the exact toolchain is pinned in `rust-toolchain.toml` and
+rustup selects it automatically. The MSRV is **1.70** (`rust-version` in
 `Cargo.toml`), so please do not use standard-library APIs newer than that —
-CI builds on current stable and will not catch an MSRV regression by itself.
+CI builds on the pinned toolchain and will not catch an MSRV regression by
+itself.
 
 The checks CI runs (`.github/workflows/ci.yml`), and the fastest way to
 reproduce them locally:
