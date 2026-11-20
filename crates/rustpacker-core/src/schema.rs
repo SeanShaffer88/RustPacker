@@ -535,6 +535,131 @@ pub fn safe_file_name(raw: &str) -> String {
     }
 }
 
+/// Longest install path the installer accepts, in UTF-16 code units.
+///
+/// A Win32 path is limited to 32,767 characters, but every component except
+/// the root is limited to 255, and an install directory deeper than this is
+/// almost certainly a mistake rather than an intent.
+pub const MAX_INSTALL_PATH: usize = 4096;
+
+/// Windows directories an install must never target.
+///
+/// Installing over the OS directory, a system directory, or a drive root
+/// either fails halfway (leaving a half-installed app) or corrupts Windows.
+/// Comparison is case-insensitive and ignores trailing separators, because
+/// `C:\WINDOWS\System32\` and `c:\windows\system32` are the same place.
+const FORBIDDEN_ROOTS: &[&str] = &[
+    "windows",
+    "windows\\system32",
+    "windows\\syswow64",
+    "windows\\system",
+    "program files\\windowsapps",
+    "users",
+    "users\\public",
+    "$recycle.bin",
+    "system volume information",
+    "recovery",
+    "boot",
+];
+
+/// Reject install directories that cannot or must not be used.
+///
+/// Returns a human-readable reason, suitable for putting straight in a
+/// message box. `Ok` means the path is *plausible*: the caller still has to
+/// create it, because writability can only be tested by trying.
+pub fn validate_install_dir(raw: &str) -> Result<(), String> {
+    let path = raw.trim();
+    if path.is_empty() {
+        return Err("Choose an install folder.".to_string());
+    }
+    if path.len() > MAX_INSTALL_PATH {
+        return Err(format!(
+            "That folder path is {} characters long; the limit is {MAX_INSTALL_PATH}.",
+            path.len()
+        ));
+    }
+    // Invalid characters: everything NTFS forbids in a name, plus the
+    // control range. A folder path may contain '\' and ':' (drive letter),
+    // but not the others.
+    if let Some(bad) = path
+        .chars()
+        .find(|&c| matches!(c, '<' | '>' | '"' | '|' | '?' | '*') || (c as u32) < 0x20)
+    {
+        return Err(format!(
+            "That folder path contains {bad:?}, which Windows does not allow in a path."
+        ));
+    }
+
+    // A relative path would be resolved against the installer's working
+    // directory, which is not something a user can reason about.
+    let bytes = path.as_bytes();
+    let has_drive = bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic();
+    let is_unc = path.starts_with("\\\\");
+    let is_device = path.starts_with("\\\\.\\") || path.starts_with("\\??\\");
+    if is_device {
+        return Err("That is a device path, not a folder.".to_string());
+    }
+    if !has_drive && !is_unc {
+        return Err(format!(
+            "\"{path}\" is not a full path. Start it with a drive letter, e.g. C:\\Programs."
+        ));
+    }
+
+    // Component checks: empty components double up separators, "." and ".."
+    // are relative, and a reserved device name as a folder name is silently
+    // unusable on Windows.
+    let body = if has_drive { &path[2..] } else { path };
+    let mut components = 0usize;
+    for part in body.split(|c| c == '\\' || c == '/') {
+        if part.is_empty() {
+            continue;
+        }
+        components += 1;
+        if part == "." || part == ".." {
+            return Err(format!(
+                "\"{path}\" is not a full path: \"{part}\" makes it depend on the current folder."
+            ));
+        }
+        if part.len() > 255 {
+            return Err(format!(
+                "The folder name \"{}\" is longer than Windows allows (255 characters).",
+                part
+            ));
+        }
+        let stem = part.split('.').next().unwrap_or(part);
+        if is_reserved_device_name(stem) {
+            return Err(format!(
+                "\"{part}\" is a reserved Windows device name; Windows cannot create that folder."
+            ));
+        }
+        // Names cannot end in a dot or a space: Windows strips them, so the
+        // folder created would not be the folder asked for.
+        if part.ends_with(' ') || part.ends_with('.') {
+            return Err(format!(
+                "The folder name \"{part}\" ends with a space or a dot; Windows would silently drop it."
+            ));
+        }
+    }
+    if components == 0 {
+        return Err(format!(
+            "\"{path}\" is a drive root. Choose a folder inside it, e.g. {path}Programs."
+        ));
+    }
+
+    // Forbidden locations: compare the path below the drive root, with
+    // separators normalised and case folded.
+    let below_root = body.replace('/', "\\");
+    let below_root = below_root.trim_matches('\\').to_ascii_lowercase();
+    for forbidden in FORBIDDEN_ROOTS {
+        if below_root == *forbidden {
+            return Err(format!(
+                "\"{path}\" is a Windows system folder. Choose somewhere else."
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl ProjectConfig {
     pub fn from_toml(text: &str) -> Result<Self, String> {
         let mut cfg: ProjectConfig =
@@ -791,6 +916,84 @@ impl ProjectConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- M11: install-directory validation -------------------------------
+
+    #[test]
+    fn ordinary_install_dirs_are_accepted() {
+        for good in [
+            r"C:\Program Files\My App",
+            r"C:\Program Files\My App\",
+            r"c:\program files\my app",
+            r"D:\Apps\Widget",
+            r"\\server\share\Widget",
+            r"C:\Users\sean\AppData\Local\Programs\Widget",
+        ] {
+            assert!(
+                validate_install_dir(good).is_ok(),
+                "{good} should be accepted: {:?}",
+                validate_install_dir(good)
+            );
+        }
+    }
+
+    #[test]
+    fn install_dir_rejects_what_windows_will_not_create() {
+        // (input, a word the message must contain)
+        let cases = [
+            ("", "Choose"),
+            ("   ", "Choose"),
+            (r"Programs\Widget", "full path"),
+            (r"\Widget", "full path"),
+            (r"C:\Programs\..\..\Windows", "current folder"),
+            (r"C:\Programs\.\Widget", "current folder"),
+            (r"C:\Programs\Wi|dget", "does not allow"),
+            (r"C:\Programs\Wi<dget", "does not allow"),
+            (r"C:\Programs\NUL", "reserved"),
+            (r"C:\Programs\con", "reserved"),
+            (r"C:\Programs\NUL.txt", "reserved"),
+            (r"C:\Programs\Widget ", "space or a dot"),
+            (r"C:\Programs\Widget.", "space or a dot"),
+            (r"C:\", "drive root"),
+            (r"\\.\C:\Widget", "device path"),
+        ];
+        for (input, needle) in cases {
+            match validate_install_dir(input) {
+                Ok(()) => panic!("{input:?} should have been rejected"),
+                Err(msg) => assert!(
+                    msg.to_lowercase().contains(needle.to_lowercase()),
+                    "{input:?} produced {msg:?}, expected it to mention {needle:?}"
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn install_dir_rejects_windows_system_locations() {
+        for bad in [
+            r"C:\Windows",
+            r"C:\Windows\",
+            r"c:\windows\system32",
+            r"C:\WINDOWS\SysWOW64\",
+            r"C:\Program Files\WindowsApps",
+            r"C:\Users",
+            r"C:\$Recycle.Bin",
+            r"C:\System Volume Information",
+        ] {
+            let err = validate_install_dir(bad).expect_err(bad);
+            assert!(err.contains("system folder"), "{bad} -> {err}");
+        }
+    }
+
+    #[test]
+    fn install_dir_rejects_overlong_paths_and_component_names() {
+        let long_component = format!(r"C:\{}", "a".repeat(256));
+        assert!(validate_install_dir(&long_component)
+            .expect_err("component")
+            .contains("255"));
+        let long_path = format!(r"C:\{}", "a/".repeat(3000));
+        assert!(validate_install_dir(&long_path).is_err());
+    }
 
     #[test]
     fn theme_defaults_are_one_dark_pro() {

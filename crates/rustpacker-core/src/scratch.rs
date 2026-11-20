@@ -44,7 +44,7 @@ impl ScratchDir {
     }
 
     /// `self.path().join(part)`.
-    pub fn join(&self, part: &str) -> PathBuf {
+    pub fn join<P: AsRef<Path>>(&self, part: P) -> PathBuf {
         self.path.join(part)
     }
 }

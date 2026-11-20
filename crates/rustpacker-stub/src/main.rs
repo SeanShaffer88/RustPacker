@@ -58,7 +58,7 @@ mod imp {
         HBRUSH, HFONT,
     };
     use windows_sys::Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+        CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_INPROC_SERVER,
         COINIT_APARTMENTTHREADED,
     };
     use windows_sys::Win32::System::Registry::{
@@ -76,7 +76,9 @@ mod imp {
         EnableWindow, SetFocus, VK_RETURN, VK_SPACE,
     };
     use windows_sys::Win32::UI::Shell::{
-        SHGetFolderPathW, ShellExecuteW, CSIDL_DESKTOPDIRECTORY, CSIDL_PROGRAMS,
+        SHCreateItemFromParsingName, SHGetFolderPathW, ShellExecuteW, FileOpenDialog,
+        CSIDL_DESKTOPDIRECTORY, CSIDL_PROGRAMS, FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST,
+        FOS_PICKFOLDERS, IShellItem, SIGDN_FILESYSPATH,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
@@ -109,6 +111,8 @@ mod imp {
     const ID_TITLE: i32 = 100;
     const ID_BODY: i32 = 101;
     const ID_DIR_EDIT: i32 = 200;
+    /// M11: the Browse button beside the folder field.
+    const ID_DIR_BROWSE: i32 = 201;
     const ID_PROGRESS: i32 = 210;
     const ID_STATUS: i32 = 211;
     const ID_CHK_DESKTOP: i32 = 300;
@@ -857,6 +861,62 @@ mod imp {
         save_completed: *const c_void,
         get_cur_file: *const c_void,
     }
+    const IID_IFILE_OPEN_DIALOG: GUID = GUID::from_u128(0xd57c7288_d4ad_4768_be02_9d969532d960);
+    const IID_ISHELL_ITEM: GUID = GUID::from_u128(0x43826d1e_e718_42ee_bc55_a1e261c37bfe);
+
+    /// `IFileDialog`'s vtable, in declaration order.
+    ///
+    /// `IFileOpenDialog` derives from `IFileDialog`, which derives from
+    /// `IModalWindow` (`Show`), which derives from `IUnknown`. The order here
+    /// is the `shobjidl_core.h` order exactly — `IFileDialog` has **no**
+    /// `GetFileTypes`, only `SetFileTypes`/`SetFileTypeIndex`/`GetFileTypeIndex`
+    /// — because a single misplaced slot would call the wrong function.
+    /// Only `SetOptions`, `SetTitle`, `SetFolder`, `Show` and `GetResult` are
+    /// typed; the rest are opaque placeholders.
+    #[repr(C)]
+    struct IFileOpenDialogVtbl {
+        base: IUnknownVtbl,
+        // IModalWindow
+        show: unsafe extern "system" fn(*mut c_void, HWND) -> HRESULT,
+        // IFileDialog, 1..=23
+        set_file_types: *const c_void, // 1
+        set_file_type_index: *const c_void, // 2
+        get_file_type_index: *const c_void, // 3
+        advise: *const c_void,         // 4
+        unadvise: *const c_void,       // 5
+        set_options: unsafe extern "system" fn(*mut c_void, u32) -> HRESULT, // 6
+        get_options: *const c_void,    // 7
+        set_default_folder: *const c_void, // 8
+        set_folder: unsafe extern "system" fn(*mut c_void, *mut c_void) -> HRESULT, // 9
+        get_folder: *const c_void,     // 10
+        get_current_selection: *const c_void, // 11
+        set_file_name: *const c_void,  // 12
+        get_file_name: *const c_void,  // 13
+        set_title: unsafe extern "system" fn(*mut c_void, PCWSTR) -> HRESULT, // 14
+        set_ok_button_label: *const c_void, // 15
+        set_file_name_label: *const c_void, // 16
+        get_result: unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT, // 17
+        add_place: *const c_void,      // 18
+        set_default_extension: *const c_void, // 19
+        close: *const c_void,          // 20
+        set_client_guid: *const c_void, // 21
+        clear_client_data: *const c_void, // 22
+        set_filter: *const c_void,     // 23
+    }
+
+    // IShellItem: IUnknown + BindToHandler, GetParent, GetDisplayName,
+    // GetAttributes, Compare.
+    #[repr(C)]
+    struct IShellItemVtbl {
+        base: IUnknownVtbl,
+        bind_to_handler: *const c_void,
+        get_parent: *const c_void,
+        get_display_name:
+            unsafe extern "system" fn(*mut c_void, u32, *mut *mut u16) -> HRESULT,
+        get_attributes: *const c_void,
+        compare: *const c_void,
+    }
+
     fn com_vtbl<T>(obj: *mut c_void) -> *const T {
         unsafe { *(obj as *const *const T) }
     }
@@ -1014,6 +1074,115 @@ mod imp {
             com_release(obj);
             outcome
         }
+    }
+
+    /// Ask the user for a folder with the modern shell picker.
+    ///
+    /// M11: the folder page previously offered a text box and nothing else, so
+    /// finding a directory meant typing a path from memory. `IFileOpenDialog`
+    /// with `FOS_PICKFOLDERS` is the control Explorer itself uses; it is
+    /// available on every supported Windows version (Vista+). Returns `None`
+    /// when the user cancels, and `Err` only when the dialog could not be
+    /// shown at all, so an unexpected failure is reported rather than
+    /// pretending the user cancelled.
+    fn pick_folder(owner: HWND, title: &str, initial: &str) -> Result<Option<String>, String> {
+        unsafe {
+            let hr_init = CoInitializeEx(std::ptr::null_mut(), COINIT_APARTMENTTHREADED);
+            let we_initialised = hr_init >= 0;
+            let outcome = pick_folder_inner(owner, title, initial);
+            if we_initialised {
+                CoUninitialize();
+            }
+            outcome
+        }
+    }
+
+    unsafe fn pick_folder_inner(
+        owner: HWND,
+        title: &str,
+        initial: &str,
+    ) -> Result<Option<String>, String> {
+        let mut dialog: *mut c_void = std::ptr::null_mut();
+        let hr = CoCreateInstance(
+            &FileOpenDialog,
+            std::ptr::null_mut(),
+            CLSCTX_INPROC_SERVER,
+            &IID_IFILE_OPEN_DIALOG,
+            &mut dialog,
+        );
+        if hr < 0 || dialog.is_null() {
+            return Err(format!(
+                "the folder picker could not be created (0x{:08x})",
+                hr as u32
+            ));
+        }
+
+        let outcome = (|| -> Result<Option<String>, String> {
+            let vtbl = com_vtbl::<IFileOpenDialogVtbl>(dialog);
+            let options = FOS_PICKFOLDERS | FOS_PATHMUSTEXIST | FOS_FORCEFILESYSTEM;
+            let hr = ((*vtbl).set_options)(dialog, options);
+            if hr < 0 {
+                return Err(format!("the folder picker could not be configured (0x{:08x})", hr as u32));
+            }
+            let wtitle = wide(title);
+            let _ = ((*vtbl).set_title)(dialog, pcw(&wtitle));
+
+            // Start where the app is being installed, if that folder exists:
+            // SHCreateItemFromParsingName fails for a path that is not there,
+            // which is exactly the case where starting elsewhere is right.
+            if !initial.trim().is_empty() {
+                let winitial = wide(initial);
+                let mut item: *mut c_void = std::ptr::null_mut();
+                let hr = SHCreateItemFromParsingName(
+                    pcw(&winitial),
+                    std::ptr::null(),
+                    &IID_ISHELL_ITEM,
+                    &mut item,
+                );
+                if hr >= 0 && !item.is_null() {
+                    let _ = ((*vtbl).set_folder)(dialog, item);
+                    com_release(item);
+                }
+            }
+
+            let hr = ((*vtbl).show)(dialog, owner);
+            // The user pressing Cancel is a normal outcome, not an error:
+            // HRESULT_FROM_WIN32(ERROR_CANCELLED) == 0x8007_04C7.
+            if (hr as u32) == 0x8007_04C7 {
+                return Ok(None);
+            }
+            if hr < 0 {
+                return Err(format!("the folder picker failed (0x{:08x})", hr as u32));
+            }
+
+            let mut item: *mut c_void = std::ptr::null_mut();
+            let hr = ((*vtbl).get_result)(dialog, &mut item);
+            if hr < 0 || item.is_null() {
+                return Err(format!(
+                    "the folder picker returned no folder (0x{:08x})",
+                    hr as u32
+                ));
+            }
+            let ivtbl = com_vtbl::<IShellItemVtbl>(item);
+            let mut name: *mut u16 = std::ptr::null_mut();
+            let hr = ((*ivtbl).get_display_name)(item, SIGDN_FILESYSPATH, &mut name);
+            if hr < 0 || name.is_null() {
+                com_release(item);
+                return Err(format!(
+                    "the chosen folder could not be read (0x{:08x})",
+                    hr as u32
+                ));
+            }
+            // The shell allocates this string with CoTaskMemAlloc.
+            let len = (0..).take_while(|&i| *name.add(i) != 0).count();
+            let text = String::from_utf16_lossy(std::slice::from_raw_parts(name, len));
+            CoTaskMemFree(name as *const c_void);
+            com_release(item);
+            Ok(Some(text))
+        })();
+
+        com_release(dialog);
+        outcome
     }
 
     // ------------------------------------------------------------------
@@ -1568,6 +1737,7 @@ mod imp {
         cancel_hwnd: HWND,
         // Page controls (null when not on that page).
         dir_edit: HWND,
+        dir_browse: HWND,
         progress: HWND,
         status: HWND,
         chk_desktop: HWND,
@@ -1716,6 +1886,12 @@ mod imp {
     const WS_VISIBLE_: u32 = 0x1000_0000;
     const WS_TABSTOP_: u32 = 0x0001_0000;
     const WS_BORDER_: u32 = 0x0080_0000;
+    /// `ES_AUTOHSCROLL` — a long install path scrolls instead of being clipped.
+    const ES_AUTOHSCROLL: u32 = 0x0080;
+    /// `BS_PUSHBUTTON` — the default button behaviour for a plain button.
+    const BS_PUSHBUTTON_: u32 = 0x0000_0000;
+    /// Width of the Browse button beside the folder field, in pixels.
+    const BROWSE_WIDTH: i32 = 88;
 
     #[allow(clippy::too_many_arguments)] // mirrors CreateWindowExW's own signature
     unsafe fn make_child(
@@ -1755,6 +1931,7 @@ mod imp {
     fn destroy_page_controls(state: &mut WizardState) {
         for slot in [
             &mut state.dir_edit,
+            &mut state.dir_browse,
             &mut state.progress,
             &mut state.status,
             &mut state.chk_desktop,
@@ -1853,21 +2030,41 @@ mod imp {
 
         match page {
             Page::Directory => {
+                // The field keeps the left column; Browse sits to its right in
+                // the same row so the two read as one control.
+                let field_width = 512 - BROWSE_WIDTH - 8;
                 let edit = unsafe {
                     make_child(
                         hwnd,
                         "EDIT",
                         &install_dir,
-                        WS_CHILD_ | WS_VISIBLE_ | WS_TABSTOP_ | WS_BORDER_ | 0x0080, // ES_AUTOHSCROLL
+                        WS_CHILD_ | WS_VISIBLE_ | WS_TABSTOP_ | WS_BORDER_ | ES_AUTOHSCROLL,
                         24,
                         196,
-                        512,
+                        field_width,
                         26,
                         ID_DIR_EDIT,
                         font,
                     )
                 };
-                with_state(|s| s.dir_edit = edit);
+                let browse = unsafe {
+                    make_child(
+                        hwnd,
+                        "BUTTON",
+                        "Browse...",
+                        WS_CHILD_ | WS_VISIBLE_ | WS_TABSTOP_ | BS_PUSHBUTTON_,
+                        24 + field_width + 8,
+                        195,
+                        BROWSE_WIDTH,
+                        28,
+                        ID_DIR_BROWSE,
+                        font,
+                    )
+                };
+                with_state(|s| {
+                    s.dir_edit = edit;
+                    s.dir_browse = browse;
+                });
             }
             Page::Installing => {
                 let progress = unsafe {
@@ -2186,8 +2383,10 @@ mod imp {
             Page::Directory => {
                 let edit = with_state(|s| s.dir_edit).unwrap_or(std::ptr::null_mut());
                 let chosen = get_text(edit).trim().to_string();
-                if chosen.is_empty() {
-                    message_box("Please choose an install folder first.", "Setup", true);
+                // M11: one shared rule, so the installer and `rustpacker
+                // validate` cannot disagree about what a usable folder is.
+                if let Err(reason) = rustpacker_core::schema::validate_install_dir(&chosen) {
+                    message_box(&reason, "Setup", true);
                     return;
                 }
                 with_state(|s| {
@@ -2204,6 +2403,25 @@ mod imp {
                     show_page(index + 1);
                 }
             }
+        }
+    }
+
+    /// Browse button: ask the shell for a folder and put it in the field.
+    ///
+    /// A dialog failure is reported, not swallowed: silently doing nothing
+    /// looks like a dead button.
+    fn on_browse() {
+        let (hwnd, edit, current) = match with_state(|s| (s.hwnd, s.dir_edit, s.install_dir.clone()))
+        {
+            Some(v) => v,
+            None => return,
+        };
+        let typed = get_text(edit).trim().to_string();
+        let start = if typed.is_empty() { current } else { typed };
+        match pick_folder(hwnd, "Select install folder", &start) {
+            Ok(Some(chosen)) => set_text(edit, &chosen),
+            Ok(None) => {}
+            Err(e) => message_box(&format!("Could not open the folder picker.\r\n\r\n{e}"), "Setup", true),
         }
     }
 
@@ -2527,6 +2745,7 @@ mod imp {
                     match id {
                         ID_NEXT => on_next(),
                         ID_BACK => on_back(),
+                        ID_DIR_BROWSE => on_browse(),
                         ID_CANCEL => {
                             let running = with_state(|s| s.installing).unwrap_or(false);
                             if running {
@@ -2794,6 +3013,7 @@ mod imp {
             next_hwnd: null,
             cancel_hwnd: null,
             dir_edit: null,
+            dir_browse: null,
             progress: null,
             status: null,
             chk_desktop: null,
