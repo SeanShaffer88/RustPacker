@@ -47,30 +47,40 @@ jobs:
         run: |
           set -euo pipefail
           manifest=$(grep -E '^version = ' Cargo.toml | head -n1 | cut -d'"' -f2)
+          # The release project carries its own copy of the version: it
+          # names the packed assets and becomes the installed app's
+          # version. Nothing synced it with Cargo.toml, so v0.2.0 packed
+          # `RustPacker-v0.1.0-Setup.exe` and the assemble step failed on
+          # a missing file. Check all three agree, here, before building.
+          project=$(grep -E '^version = ' release/rustpacker.toml | head -n1 | cut -d'"' -f2)
           dry_run='${{ inputs.dry_run }}'
           if [ "$dry_run" = "true" ]; then
             # A dry run has no tag to check: take the version from the
             # manifest and say what tag it *would* produce.
+            version="$manifest"
+            tag="v$manifest"
             echo "DRY_RUN=true" >> "$GITHUB_ENV"
-            echo "version=$manifest" >> "$GITHUB_ENV"
-            echo "tag=v$manifest" >> "$GITHUB_ENV"
             echo "::notice::dry run — would publish tag v$manifest; nothing will be released"
-            exit 0
+          else
+            echo "DRY_RUN=false" >> "$GITHUB_ENV"
+            ref='${{ github.event.inputs.tag || github.ref_name }}'
+            tag="${ref#refs/tags/}"
+            case "$tag" in
+              v*) version="${tag#v}" ;;
+              *) echo "::error::tag '$tag' does not start with v"; exit 1 ;;
+            esac
           fi
-          echo "DRY_RUN=false" >> "$GITHUB_ENV"
-          ref='${{ github.event.inputs.tag || github.ref_name }}'
-          tag="${ref#refs/tags/}"
-          case "$tag" in
-            v*) version="${tag#v}" ;;
-            *) echo "::error::tag '$tag' does not start with v"; exit 1 ;;
-          esac
           echo "tag=$tag" >> "$GITHUB_ENV"
           echo "version=$version" >> "$GITHUB_ENV"
           if [ "$version" != "$manifest" ]; then
-            echo "::error::tag is $tag but Cargo.toml says $manifest"
+            echo "::error::releasing $version but Cargo.toml says $manifest"
             exit 1
           fi
-          echo "Releasing $tag (Cargo.toml agrees)"
+          if [ "$version" != "$project" ]; then
+            echo "::error::releasing $version but release/rustpacker.toml says $project — bump the release project too"
+            exit 1
+          fi
+          echo "Releasing $tag (Cargo.toml and release project agree)"
 
       # Build with the same flags the CI job uses, so the artifacts match what
       # was tested. `+crt-static` comes from .cargo/config.toml.

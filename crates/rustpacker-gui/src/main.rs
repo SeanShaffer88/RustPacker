@@ -24,7 +24,7 @@ fn main() {
 #[cfg(windows)]
 mod win {
     use rustpacker_core::payload::{
-        build_portable_zip, pack_directory, sha256_hex, sha256sums_txt,
+        build_portable_zip, looks_like_pe, pack_directory, sha256_hex, sha256sums_txt,
     };
     use rustpacker_core::{
         safe_file_name, FinishScreenModel, FinishSelection, InstallScope, ProjectConfig,
@@ -113,20 +113,6 @@ mod win {
     const PAGE_FINISH: usize = 2;
 
     // ---- small helpers -----------------------------------------------------
-
-    /// Same structural PE check the CLI uses before packing: `MZ`, a
-    /// plausible `e_lfanew`, and a `PE\0\0` signature.
-    fn looks_like_pe(bytes: &[u8]) -> bool {
-        if bytes.len() < 0x40 || &bytes[0..2] != b"MZ" {
-            return false;
-        }
-        let lfanew =
-            u32::from_le_bytes([bytes[0x3C], bytes[0x3D], bytes[0x3E], bytes[0x3F]]) as usize;
-        if lfanew < 0x40 || lfanew.checked_add(4).is_none_or(|end| end > bytes.len()) {
-            return false;
-        }
-        &bytes[lfanew..lfanew + 4] == b"PE\0\0"
-    }
 
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()

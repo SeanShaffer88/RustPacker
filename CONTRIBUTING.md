@@ -55,7 +55,9 @@ you couldn't.
 
 ## Cutting a release
 
-1. Bump `version` in `Cargo.toml` and move the `[Unreleased]` changelog
+1. Bump `version` in `Cargo.toml` **and in `release/rustpacker.toml`**
+   (the release project names the packed assets; `release.yml` refuses
+   to build if the two disagree), and move the `[Unreleased]` changelog
    entries under the new version heading.
 2. Tag `v<version>` and push the tag.
 3. `.github/workflows/release.yml` builds on Windows and **refuses to
