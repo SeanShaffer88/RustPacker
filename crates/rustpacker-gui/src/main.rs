@@ -1135,39 +1135,39 @@ mod win {
         ));
     }
 
-    /// One list-editor page: listbox, Add/Remove buttons, then the detail
-    /// fields of the selected entry. Detail edits write back live, so there
-    /// is no separate Apply step to forget.
-    unsafe fn build_list_page(
-        app: &mut App,
-        parent: HWND,
+    /// What one list-editor page needs: its listbox and buttons, and the
+    /// detail fields of the selected entry. Detail edits write back live,
+    /// so there is no separate Apply step to forget.
+    struct ListPageSpec {
         page: usize,
         list_id: i32,
         add_id: i32,
         del_id: i32,
-        add_text: &str,
-        fields: &[(&str, i32)],
-    ) {
-        let lb = mk_listbox(app, parent, list_id);
-        reg(app, list_id, lb);
-        app.c.pages[page].push(Row::new(
+        add_text: &'static str,
+        fields: &'static [(&'static str, i32)],
+    }
+
+    unsafe fn build_list_page(app: &mut App, parent: HWND, spec: &ListPageSpec) {
+        let lb = mk_listbox(app, parent, spec.list_id);
+        reg(app, spec.list_id, lb);
+        app.c.pages[spec.page].push(Row::new(
             std::ptr::null_mut(),
             lb,
             std::ptr::null_mut(),
             ROW_FULL,
             132,
         ));
-        let add = mk_button(app, parent, add_text, add_id);
-        let del = mk_button(app, parent, "Remove selected", del_id);
-        reg(app, add_id, add);
-        reg(app, del_id, del);
-        app.c.pages[page].push(Row::new(std::ptr::null_mut(), add, del, ROW_SPLIT, 26));
-        row_heading(app, parent, page, "Selected entry");
-        for (label, id) in fields {
+        let add = mk_button(app, parent, spec.add_text, spec.add_id);
+        let del = mk_button(app, parent, "Remove selected", spec.del_id);
+        reg(app, spec.add_id, add);
+        reg(app, spec.del_id, del);
+        app.c.pages[spec.page].push(Row::new(std::ptr::null_mut(), add, del, ROW_SPLIT, 26));
+        row_heading(app, parent, spec.page, "Selected entry");
+        for (label, id) in spec.fields {
             if *id == ID_CB_REG_ROOT {
-                row_combo(app, parent, page, label, *id);
+                row_combo(app, parent, spec.page, label, *id);
             } else {
-                row_edit(app, parent, page, label, *id);
+                row_edit(app, parent, spec.page, label, *id);
             }
         }
     }
@@ -1410,75 +1410,85 @@ mod win {
         build_list_page(
             app,
             parent,
-            EP_SHORTCUTS,
-            ID_LB_SHORTCUTS,
-            ID_BTN_SC_ADD,
-            ID_BTN_SC_DEL,
-            "Add shortcut",
-            &[
-                ("Name", ID_ED_SC_NAME),
-                ("Location", ID_ED_SC_LOCATION),
-                ("Target", ID_ED_SC_TARGET),
-                ("Arguments", ID_ED_SC_ARGS),
-            ],
+            &ListPageSpec {
+                page: EP_SHORTCUTS,
+                list_id: ID_LB_SHORTCUTS,
+                add_id: ID_BTN_SC_ADD,
+                del_id: ID_BTN_SC_DEL,
+                add_text: "Add shortcut",
+                fields: &[
+                    ("Name", ID_ED_SC_NAME),
+                    ("Location", ID_ED_SC_LOCATION),
+                    ("Target", ID_ED_SC_TARGET),
+                    ("Arguments", ID_ED_SC_ARGS),
+                ],
+            },
         );
         build_list_page(
             app,
             parent,
-            EP_REGISTRY,
-            ID_LB_REGISTRY,
-            ID_BTN_REG_ADD,
-            ID_BTN_REG_DEL,
-            "Add registry entry",
-            &[
-                ("Root", ID_CB_REG_ROOT),
-                ("Key", ID_ED_REG_KEY),
-                ("Value name", ID_ED_REG_NAME),
-                ("Value", ID_ED_REG_VALUE),
-            ],
+            &ListPageSpec {
+                page: EP_REGISTRY,
+                list_id: ID_LB_REGISTRY,
+                add_id: ID_BTN_REG_ADD,
+                del_id: ID_BTN_REG_DEL,
+                add_text: "Add registry entry",
+                fields: &[
+                    ("Root", ID_CB_REG_ROOT),
+                    ("Key", ID_ED_REG_KEY),
+                    ("Value name", ID_ED_REG_NAME),
+                    ("Value", ID_ED_REG_VALUE),
+                ],
+            },
         );
         build_list_page(
             app,
             parent,
-            EP_ASSOC,
-            ID_LB_ASSOC,
-            ID_BTN_AS_ADD,
-            ID_BTN_AS_DEL,
-            "Add association",
-            &[
-                ("Extension", ID_ED_AS_EXT),
-                ("ProgID", ID_ED_AS_PROGID),
-                ("Description", ID_ED_AS_DESC),
-                ("Open with (exe)", ID_ED_AS_OPENWITH),
-            ],
+            &ListPageSpec {
+                page: EP_ASSOC,
+                list_id: ID_LB_ASSOC,
+                add_id: ID_BTN_AS_ADD,
+                del_id: ID_BTN_AS_DEL,
+                add_text: "Add association",
+                fields: &[
+                    ("Extension", ID_ED_AS_EXT),
+                    ("ProgID", ID_ED_AS_PROGID),
+                    ("Description", ID_ED_AS_DESC),
+                    ("Open with (exe)", ID_ED_AS_OPENWITH),
+                ],
+            },
         );
         build_list_page(
             app,
             parent,
-            EP_PREREQ,
-            ID_LB_PREREQ,
-            ID_BTN_PR_ADD,
-            ID_BTN_PR_DEL,
-            "Add prerequisite",
-            &[
-                ("Name", ID_ED_PR_NAME),
-                ("Registry probe", ID_ED_PR_REGPROBE),
-                ("File probe", ID_ED_PR_FILEPROBE),
-                ("Message if missing", ID_ED_PR_MESSAGE),
-            ],
+            &ListPageSpec {
+                page: EP_PREREQ,
+                list_id: ID_LB_PREREQ,
+                add_id: ID_BTN_PR_ADD,
+                del_id: ID_BTN_PR_DEL,
+                add_text: "Add prerequisite",
+                fields: &[
+                    ("Name", ID_ED_PR_NAME),
+                    ("Registry probe", ID_ED_PR_REGPROBE),
+                    ("File probe", ID_ED_PR_FILEPROBE),
+                    ("Message if missing", ID_ED_PR_MESSAGE),
+                ],
+            },
         );
         build_list_page(
             app,
             parent,
-            EP_PROCESS,
-            ID_LB_PROCESS,
-            ID_BTN_PC_ADD,
-            ID_BTN_PC_DEL,
-            "Add process check",
-            &[
-                ("Process name", ID_ED_PC_NAME),
-                ("Message if running", ID_ED_PC_MESSAGE),
-            ],
+            &ListPageSpec {
+                page: EP_PROCESS,
+                list_id: ID_LB_PROCESS,
+                add_id: ID_BTN_PC_ADD,
+                del_id: ID_BTN_PC_DEL,
+                add_text: "Add process check",
+                fields: &[
+                    ("Process name", ID_ED_PC_NAME),
+                    ("Message if running", ID_ED_PC_MESSAGE),
+                ],
+            },
         );
 
         // Finish page.
