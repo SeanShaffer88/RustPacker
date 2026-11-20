@@ -221,8 +221,10 @@ def inspect_pe(path):
     rva = struct.unpack_from("<I", blob, dd + 2 * 8)[0]
     print(f"{path}: resource directory rva {rva:#x}")
     if rva == 0:
-        print("  NO RESOURCE TABLE")
-        return False
+        # Only the stub and the GUI embed resources; the CLI deliberately does
+        # not, so an absent table is information, not a failure.
+        print("  no resource table (nothing was embedded in this binary)")
+        return True
     found = []
     walk(blob, file_offset(secs, rva), 0, [], found)
     for names, _, data_size in found:

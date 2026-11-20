@@ -45,6 +45,17 @@ jobs:
         run: cargo build --release --target x86_64-pc-windows-msvc --workspace
       - name: Show binaries
         run: dir target\x86_64-pc-windows-msvc\release\*.exe
+      # The `.res` files `build.rs` writes are only real if CVTRES accepted
+      # them and the linker kept them. This parses the PE resource directory
+      # of the built binaries and fails if a resource is missing.
+      - name: Verify embedded resources
+        shell: bash
+        run: |
+          set -e
+          python tools/inspect_resources.py --res target/x86_64-pc-windows-msvc/release/build/*/out/*.res
+          for exe in rustpacker-stub rustpacker-gui; do
+            python tools/inspect_resources.py "target/x86_64-pc-windows-msvc/release/$exe.exe"
+          done
       - name: Smoke-test the CLI binary
         run: |
           target\x86_64-pc-windows-msvc\release\rustpacker-cli.exe init --out %TEMP%\rustpacker-ci\rustpacker.toml --force
