@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: write
 
 jobs:
   diag:
@@ -22,34 +23,27 @@ jobs:
         run: |
           set +e
           {
+            echo '<!-- rustpacker-diag -->'
             echo '### clippy'
             echo '```'
             cargo clippy --workspace --all-targets -- -D warnings 2>&1 \
-              | grep -vE '^\s+(Compiling|Checking|Finished|Downloading|Downloaded|Updating|Blocking|Locking|Adding)' | head -n 250
+              | grep -vE '^\s+(Compiling|Checking|Finished|Downloading|Downloaded|Updating|Blocking|Locking|Adding)' | head -n 200
             echo '```'
             echo '### test'
             echo '```'
-            cargo test --workspace 2>&1 | grep -vE '^\s+(Compiling|Checking|Finished|Downloading|Downloaded|Updating)' | tail -n 150
+            cargo test --workspace 2>&1 | grep -vE '^\s+(Compiling|Checking|Finished|Downloading|Downloaded|Updating)' | tail -n 120
             echo '```'
             echo '### fmt'
             echo '```'
             cargo fmt --all -- --check 2>&1 | head -n 60
             echo '```'
           } > diag.md
-          echo "===== DIAG ====="
-          cat diag.md
 
-      - name: Windows cross-check (stub/gui compile for msvc)
+      - name: Post diagnostics
+        if: always()
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set +e
-          rustup target add x86_64-pc-windows-msvc >/dev/null 2>&1
-          {
-            echo '### windows clippy'
-            echo '```'
-            cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings 2>&1 \
-              | grep -vE '^\s+(Compiling|Checking|Finished|Downloading|Downloaded|Updating)' | head -n 250
-            echo '```'
-          } | tee win.md
-          echo "===== WINDOWS ====="
-          cat win.md
+          head -c 60000 diag.md > diag-truncated.md || true
+          gh pr comment 3 --body-file diag-truncated.md
