@@ -21,12 +21,15 @@ jobs:
         shell: bash
         run: |
           export RUSTFLAGS="-D warnings"
+          cargo fmt --all -- --check > fmt.txt 2>&1 || true
+          cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc > clippy.txt 2>&1 || true
           {
             echo '## fmt'
-            cargo fmt --all -- --check 2>&1 | head -150
+            head -150 fmt.txt
             echo '## clippy errors'
-            cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc 2>&1 | grep -E 'error|warning:' -A 8 | head -300
-            echo '## clippy done'
+            grep -E 'error|warning:' -A 8 clippy.txt | head -300 || true
+            echo '## clippy tail'
+            tail -5 clippy.txt
           } > report.txt 2>&1
           true
       - name: Post report

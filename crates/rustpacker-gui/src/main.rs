@@ -870,8 +870,7 @@ mod win {
                     DefWindowProcW(hwnd, msg, wparam, lparam)
                 }
             }
-            WM_CTLCOLOREDIT
-            | windows_sys::Win32::UI::WindowsAndMessaging::WM_CTLCOLORLISTBOX => {
+            WM_CTLCOLOREDIT | windows_sys::Win32::UI::WindowsAndMessaging::WM_CTLCOLORLISTBOX => {
                 if let Some(app) = app_ref(hwnd) {
                     color_control(app, lparam as HWND, wparam as HDC, true)
                 } else {
@@ -1843,7 +1842,13 @@ mod win {
                     let half = ((w - 8) / 2).max(40);
                     move_to(row.main, x, y, half, row.extent);
                     if !row.extra.is_null() {
-                        move_to(row.extra, x + half + 8, y, (w - half - 8).max(40), row.extent);
+                        move_to(
+                            row.extra,
+                            x + half + 8,
+                            y,
+                            (w - half - 8).max(40),
+                            row.extent,
+                        );
                     }
                 }
                 _ => move_to(row.label, x, y + 2, w, 20),
@@ -2178,7 +2183,13 @@ mod win {
                 } else {
                     format!("  {}", s.arguments)
                 };
-                format!("{}  [{}]  ->  {}{}", dash(&s.name), s.location, s.target, args)
+                format!(
+                    "{}  [{}]  ->  {}{}",
+                    dash(&s.name),
+                    s.location,
+                    s.target,
+                    args
+                )
             }
             LIST_REGISTRY => {
                 let r = &app.cfg.registry[idx];
@@ -2258,17 +2269,16 @@ mod win {
                 let e = valid.then(|| app.cfg.registry[idx as usize].clone());
                 combo_set_sel(
                     ctl(app, ID_CB_REG_ROOT),
-                    if e.as_ref().is_some_and(|v| v.root.eq_ignore_ascii_case("HKLM")) {
+                    if e.as_ref()
+                        .is_some_and(|v| v.root.eq_ignore_ascii_case("HKLM"))
+                    {
                         1
                     } else {
                         0
                     },
                 );
                 set_text(ctl(app, ID_ED_REG_KEY), e.as_ref().map_or("", |v| &v.key));
-                set_text(
-                    ctl(app, ID_ED_REG_NAME),
-                    e.as_ref().map_or("", |v| &v.name),
-                );
+                set_text(ctl(app, ID_ED_REG_NAME), e.as_ref().map_or("", |v| &v.name));
                 set_text(
                     ctl(app, ID_ED_REG_VALUE),
                     e.as_ref().map_or("", |v| &v.value),
@@ -2276,7 +2286,10 @@ mod win {
             }
             LIST_ASSOC => {
                 let e = valid.then(|| app.cfg.file_associations[idx as usize].clone());
-                set_text(ctl(app, ID_ED_AS_EXT), e.as_ref().map_or("", |v| &v.extension));
+                set_text(
+                    ctl(app, ID_ED_AS_EXT),
+                    e.as_ref().map_or("", |v| &v.extension),
+                );
                 set_text(
                     ctl(app, ID_ED_AS_PROGID),
                     e.as_ref().map_or("", |v| &v.prog_id),
