@@ -27,10 +27,7 @@ impl ScratchDir {
     /// the pid and the counter.
     pub fn new(prefix: &str) -> Self {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "{prefix}-{}-{id}",
-            std::process::id()
-        ));
+        let path = std::env::temp_dir().join(format!("{prefix}-{}-{id}", std::process::id()));
         // A previous run may have been killed before its drop ran.
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).expect("create scratch dir");

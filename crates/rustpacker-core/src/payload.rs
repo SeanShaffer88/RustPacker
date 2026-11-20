@@ -1229,8 +1229,10 @@ mod tests {
         // than re-hashing the payload, so prove the two agree.
         assert_eq!(
             info.payload_sha256_hex,
-            sha256_hex(&exe[info.payload_offset as usize
-                ..(info.payload_offset + info.payload_len) as usize])
+            sha256_hex(
+                &exe[info.payload_offset as usize
+                    ..(info.payload_offset + info.payload_len) as usize]
+            )
         );
         assert_eq!(info.payload_sha256_hex.len(), 64);
         let manifest = read_manifest(&exe).expect("manifest");
