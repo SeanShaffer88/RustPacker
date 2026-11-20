@@ -228,10 +228,9 @@ const ICON_SIZE: u32 = 32;
 /// A 32×32 32bpp icon as a bare DIB: a dark terminal window with a green
 /// prompt, matching the wizard's One Dark palette.
 fn icon_bytes(glyph: IconGlyph) -> Vec<u8> {
-    // The AND mask is 1 bit per pixel, rows padded to 4 bytes. Written as
-    // plain arithmetic because `div_ceil` needs Rust 1.73 and the workspace
-    // supports 1.70.
-    let mask_stride = ((ICON_SIZE + 31) / 32 * 4) as usize;
+    // The AND mask is 1 bit per pixel, so its row width rounds up to whole
+    // bytes (`div_ceil(32)` pixels = 4 bytes at 32×32).
+    let mask_stride = (ICON_SIZE.div_ceil(32) * 4) as usize;
     let xor_len = (ICON_SIZE * ICON_SIZE * 4) as usize;
     let and_len = mask_stride * ICON_SIZE as usize;
     let dib_len = 40 + xor_len + and_len;

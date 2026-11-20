@@ -58,10 +58,17 @@ code.
 - **Smaller uninstaller (AUDIT L16).** `Uninstall.exe` is written with
   the payload stripped instead of copying the whole installer.
 - **Pinned toolchain (AUDIT L9).** CI, releases and local builds use
-  Rust 1.100.0 (`rust-toolchain.toml`); the MSRV stays 1.70.
+  Rust 1.100.0 (`rust-toolchain.toml`), and an `msrv` job builds with
+  the floor toolchain so the MSRV claim is verified like everything
+  else.
 
 ### Fixed
 
+- **The MSRV claim was unbuildable.** The workspace claimed Rust 1.70,
+  but the dependency tree (indexmap, via serde_json/toml) uses edition
+  2024, which cargo older than 1.85 cannot parse. The MSRV is now
+  honestly 1.85, and the new `msrv` CI job proves the workspace builds
+  with exactly that toolchain.
 - **Finish-page edge cases (AUDIT L17).** A whitespace-only
   `startup_tray_arg` now falls back to `tray_arg` instead of silently
   dropping the tray argument, and quote-leading argument fragments are

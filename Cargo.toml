@@ -10,8 +10,12 @@ members = [
 [workspace.package]
 version = "0.2.0"
 edition = "2021"
-# 1.70 is where std::sync::OnceLock stabilised; the workspace uses it.
-rust-version = "1.70"
+# The floor is set by the dependency tree: indexmap (via serde_json and
+# toml) uses edition 2024, which needs cargo 1.85 — Cargo.lock v4 alone
+# would only demand 1.78. The `msrv` CI job builds with exactly this
+# toolchain so the claim cannot silently rot. (It was nominally 1.70,
+# for std::sync::OnceLock, and unbuildable in practice for a while.)
+rust-version = "1.85"
 license = "MIT"
 authors = ["Sean Shaffer"]
 
