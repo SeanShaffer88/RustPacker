@@ -28,7 +28,7 @@ jobs:
   release:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # On a tag push this is the tag itself. On a manual run it is the
           # named tag, or — for a dry run — the branch the run was started
