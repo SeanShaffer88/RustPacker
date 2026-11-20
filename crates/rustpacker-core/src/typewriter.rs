@@ -298,7 +298,8 @@ mod tests {
         tw.skip();
         tw.write_visible(&mut buf);
         assert_eq!(buf, "abc");
-        assert_eq!(buf.capacity() >= 3, true);
+        // The buffer was reused, not reallocated from scratch.
+        assert!(buf.capacity() >= 3);
     }
 
     #[test]
