@@ -33,6 +33,18 @@ jobs:
             echo '```'
             cargo fmt --all -- --check 2>&1 | head -n 120
             echo '```'
+            echo '### resource verification (same as ci.yml)'
+            echo '```'
+            shopt -s nullglob
+            for f in target/x86_64-pc-windows-msvc/release/build/*/out/*.res; do
+              echo "== $f"
+              python tools/inspect_resources.py --res "$f" 2>&1 | tail -4
+            done
+            for exe in rustpacker-stub rustpacker-gui; do
+              echo "== $exe"
+              python tools/inspect_resources.py "target/x86_64-pc-windows-msvc/release/$exe.exe" 2>&1 | tail -8
+            done
+            echo '```'
             echo '### clippy (windows target)'
             echo '```'
             cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings 2>&1 \
