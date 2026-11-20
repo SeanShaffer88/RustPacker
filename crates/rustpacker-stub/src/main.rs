@@ -1146,11 +1146,13 @@ mod imp {
             let extracted =
                 extract_payload_with_progress(&payload.exe, &dest, &mut |done, total, path| {
                     check_canceled()?;
-                    let percent = if total == 0 {
-                        20
-                    } else {
-                        (20 + done.saturating_mul(45) / total).min(65) as u32
-                    };
+                    // `checked_div` rather than an `if total == 0` guard:
+                    // an empty archive reports 20%, and the arithmetic
+                    // cannot divide by zero by construction.
+                    let percent = done
+                        .saturating_mul(45)
+                        .checked_div(total)
+                        .map_or(20, |share| (20 + share).min(65)) as u32;
                     report(percent, &format!("Extracting {path}..."));
                     Ok(())
                 })?;
@@ -1961,7 +1963,7 @@ mod imp {
             hwnd,
         } = job;
 
-        let payload_ref = payload.as_ref().map(|p| &**p);
+        let payload_ref = payload.as_deref();
         let outcome = perform_install(&cfg, &install_dir, payload_ref, |percent, text| {
             // Never touch a window from here: publish the text, then let the
             // UI thread draw it. `perform_install` reports coarse steps, so
