@@ -320,10 +320,10 @@ fn prepare_headers(sources: &[(String, Source<'_>)]) -> Result<Vec<ArchiveHeader
                 "payload source must not contain the reserved entry {CONFIG_ENTRY_NAME}"
             ));
         }
-        if path.as_bytes().len() > MAX_PATH_LEN {
+        if path.len() > MAX_PATH_LEN {
             return Err(format!(
                 "payload entry path is too long ({} bytes, max {MAX_PATH_LEN}): {path}",
-                path.as_bytes().len()
+                path.len()
             ));
         }
         if !seen.insert(path.to_ascii_lowercase()) {
@@ -371,7 +371,7 @@ fn build_payload(
     // overhead plus the scanned sizes, so it is exact and known up front.
     let mut archive_len: u64 = 4;
     for (header, _) in &sorted {
-        let path_len = header.path.as_bytes().len() as u64;
+        let path_len = header.path.len() as u64;
         archive_len = archive_len
             .checked_add(2 + path_len + 8 + 32)
             .and_then(|n| n.checked_add(header.size))
@@ -384,11 +384,15 @@ fn build_payload(
     }
 
     let mut payload: Vec<u8> = Vec::new();
-    {
-        let mut encoder = zstd::Encoder::new(&mut payload, DEFAULT_ZSTD_LEVEL)
-            .map_err(|e| format!("payload compression failed: {e}"))?;
+    // The counter borrows the encoder, so the whole write phase lives in an
+    // inner fn: it returns once the borrow ends and `finish()` can run.
+    fn write_archive<R: Write>(
+        sink: R,
+        sorted: &[(ArchiveHeader, Source<'_>)],
+        archive_len: u64,
+    ) -> Result<(), String> {
         let mut counting = CountingWriter {
-            inner: &mut encoder,
+            inner: sink,
             count: 0,
         };
         counting
@@ -419,8 +423,13 @@ fn build_payload(
                 counting.count
             ));
         }
-        // `counting` borrows the encoder; end its scope before finishing.
-        drop(counting);
+        Ok(())
+    }
+
+    {
+        let mut encoder = zstd::Encoder::new(&mut payload, DEFAULT_ZSTD_LEVEL)
+            .map_err(|e| format!("payload compression failed: {e}"))?;
+        write_archive(&mut encoder, &sorted, archive_len)?;
         encoder
             .finish()
             .map_err(|e| format!("payload compression failed: {e}"))?;
@@ -1429,7 +1438,7 @@ mod tests {
     #[test]
     fn manifest_of_a_multi_file_payload_is_complete() {
         let files: Vec<(String, Vec<u8>)> = (0..64)
-            .map(|i| (format!("dir{}/file{i}.bin"), vec![i as u8; 1000]))
+            .map(|i| (format!("dir{i}/file{i}.bin"), vec![i as u8; 1000]))
             .collect();
         let exe = pack_files(&stub(), files, "{}").expect("pack");
         let manifest = read_manifest(&exe).expect("manifest");
