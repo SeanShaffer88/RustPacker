@@ -129,15 +129,13 @@ fn build_res(resources: &[(u32, u32, Vec<u8>)]) -> Vec<u8> {
     let mut out: Vec<u8> = Vec::with_capacity(RES_PROLOGUE_LEN as usize + 4096);
 
     // ---- prologue -------------------------------------------------------
-    // A record-shaped header with no payload: DataSize 0, HeaderSize 32,
-    // type 0, name 0. `cvtres` compares this against what it expects and
-    // readers simply skip it.
+    // 16-byte magic header: DataSize 0, HeaderSize 32, and eight zero bytes
+    // where a real record would start its type/name identifiers.
     out.extend_from_slice(&0u32.to_le_bytes()); // DataSize
     out.extend_from_slice(&RES_PROLOGUE_LEN.to_le_bytes()); // HeaderSize
-    write_res_identifier(&mut out, 0);
-    write_res_identifier(&mut out, 0);
-    out.extend_from_slice(&[0u8; RES_HEADER_SUFFIX_LEN as usize]); // suffix
-    // ...followed by the 16-byte null entry.
+    out.extend_from_slice(&[0u8; RES_MAGIC_SIZE as usize - 8]);
+    // ...then the 16-byte all-zero null entry. Readers skip prologue + null
+    // entry, i.e. the first 32 bytes, before the first real record.
     out.extend_from_slice(&[0u8; RES_NULL_ENTRY_LEN as usize]);
 
     for (res_type, res_id, data) in resources {
@@ -170,6 +168,8 @@ const RES_HEADER_SUFFIX_LEN: u32 = 4 + 2 + 2 + 4 + 4;
 const RES_PROLOGUE_LEN: u32 = 32;
 /// The all-zero record that follows the magic header.
 const RES_NULL_ENTRY_LEN: u32 = 16;
+/// The 16-byte header at the very start of the file.
+const RES_MAGIC_SIZE: u32 = 16;
 
 /// A resource identifier: `0xFFFF` + ordinal, which is what `rc.exe` emits
 /// for every resource this project uses (all of them are integer ids).

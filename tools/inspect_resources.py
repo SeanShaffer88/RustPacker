@@ -71,8 +71,9 @@ def parse_res(blob):
             f"bad magic header: DataSize {magic_size}, HeaderSize {magic_header}"
             " (want 0 and 32)"
         )
-    if any(blob[16:PROLOGUE_LEN]):
-        raise ValueError("null entry is not all zero")
+    if any(blob[8:PROLOGUE_LEN]):
+        # Bytes 8..16 finish the magic header, 16..32 are the null entry.
+        raise ValueError("prologue after the 8-byte header is not all zero")
     pos = PROLOGUE_LEN
     while pos < len(blob):
         data_size, header_size = struct.unpack_from("<II", blob, pos)
