@@ -137,7 +137,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python - "${{ env.version }}" <<'PYEOF' > release-notes.md
+          python - "${{ env.version }}" <<'PYEOF'
           import re, sys
           version = sys.argv[1]
           text = open("CHANGELOG.md", encoding="utf-8").read()
@@ -150,7 +150,13 @@ jobs:
           body = match.group(1)
           # Drop the trailing markdown link definitions ([Unreleased]: ...).
           body = re.split(r"^\[[^\]]+\]: ", body, flags=re.M)[0]
-          print(body.strip())
+          # Write the file ourselves rather than printing to stdout. Python on
+          # Windows encodes a redirected stdout in the ANSI code page, so an
+          # em dash (U+2014) became byte 0x97, which `gh` then read as
+          # invalid UTF-8 and rendered as a replacement character. The
+          # CHANGELOG is UTF-8; the release notes must be too.
+          with open("release-notes.md", "w", encoding="utf-8", newline="\n") as f:
+              f.write(body.strip() + "\n")
           PYEOF
           { cat release-notes.md; cat <<'EOF'
 
