@@ -76,7 +76,7 @@ mod imp {
         EnableWindow, SetFocus, VK_RETURN, VK_SPACE,
     };
     use windows_sys::Win32::UI::Shell::{
-        FileOpenDialog, IShellItem, SHCreateItemFromParsingName, SHGetFolderPathW, ShellExecuteW,
+        FileOpenDialog, SHCreateItemFromParsingName, SHGetFolderPathW, ShellExecuteW,
         CSIDL_DESKTOPDIRECTORY, CSIDL_PROGRAMS, FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST,
         FOS_PICKFOLDERS, SIGDN_FILESYSPATH,
     };
@@ -1087,7 +1087,7 @@ mod imp {
     /// pretending the user cancelled.
     fn pick_folder(owner: HWND, title: &str, initial: &str) -> Result<Option<String>, String> {
         unsafe {
-            let hr_init = CoInitializeEx(std::ptr::null_mut(), COINIT_APARTMENTTHREADED);
+            let hr_init = CoInitializeEx(std::ptr::null_mut(), COINIT_APARTMENTTHREADED as u32);
             let we_initialised = hr_init >= 0;
             let outcome = pick_folder_inner(owner, title, initial);
             if we_initialised {
@@ -1138,7 +1138,7 @@ mod imp {
                 let mut item: *mut c_void = std::ptr::null_mut();
                 let hr = SHCreateItemFromParsingName(
                     pcw(&winitial),
-                    std::ptr::null(),
+                    std::ptr::null_mut(),
                     &IID_ISHELL_ITEM,
                     &mut item,
                 );
@@ -1168,7 +1168,7 @@ mod imp {
             }
             let ivtbl = com_vtbl::<IShellItemVtbl>(item);
             let mut name: *mut u16 = std::ptr::null_mut();
-            let hr = ((*ivtbl).get_display_name)(item, SIGDN_FILESYSPATH, &mut name);
+            let hr = ((*ivtbl).get_display_name)(item, SIGDN_FILESYSPATH as u32, &mut name);
             if hr < 0 || name.is_null() {
                 com_release(item);
                 return Err(format!(

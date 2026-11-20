@@ -1244,7 +1244,10 @@ mod tests {
             stripped, stub_bytes,
             "stripping must reproduce the original stub byte for byte"
         );
-        assert_eq!(stripped.len(), find_payload(&exe).expect("find").payload_offset as usize);
+        assert_eq!(
+            stripped.len(),
+            find_payload(&exe).expect("find").payload_offset as usize
+        );
         // Very much smaller: this is the L16 saving.
         assert!(stripped.len() < exe.len());
         // An already-stripped file has no payload, so there is nothing to do.

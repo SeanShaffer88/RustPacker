@@ -339,7 +339,13 @@ mod win {
             // Pro's greys. They are now derived from the theme and kept next
             // to the brushes that were built from them.
             let elevated_rgb = TerminalTheme::parse_hex(&theme.elevated_surface_hex)
-                .unwrap_or_else(|| TerminalTheme::default().elevated_rgb());
+                .or_else(|| {
+                    // A malformed colour in a hand-edited project file falls
+                    // back to the default theme's elevated surface rather than
+                    // to a colour nobody chose.
+                    TerminalTheme::parse_hex(&TerminalTheme::default().elevated_surface_hex)
+                })
+                .unwrap_or((0x2C, 0x31, 0x3A));
             Self {
                 cfg: ProjectConfig::default(),
                 output_dir: "dist".to_string(),

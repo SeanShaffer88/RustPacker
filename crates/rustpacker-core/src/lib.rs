@@ -26,8 +26,8 @@ pub use payload::{
 pub use schema::{
     is_bare_filename, safe_file_name, validate_install_dir, AppInfo, FileAssociation, FinishConfig,
     FinishScreenModel, FinishSelection, InstallConfig, InstallScope, Prerequisite, ProcessCheck,
-    ProjectConfig, RegistryEntry, ShortcutConfig, TerminalTheme, TrayConfig, CURRENT_SCHEMA_VERSION,
-    MAX_INSTALL_PATH, MAX_SAFE_NAME,
+    ProjectConfig, RegistryEntry, ShortcutConfig, TerminalTheme, TrayConfig,
+    CURRENT_SCHEMA_VERSION, MAX_INSTALL_PATH, MAX_SAFE_NAME,
 };
 pub use scratch::ScratchDir;
 pub use typewriter::{Typewriter, DEFAULT_INTERVAL_MS};
