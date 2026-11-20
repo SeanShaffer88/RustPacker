@@ -3,7 +3,8 @@
 # let new clippy lints arrive unannounced). Bump this deliberately, in the
 # same commit as any fixes the newer compiler requires.
 #
-# This is the *build* toolchain, not the MSRV: the workspace still supports
-# rustc 1.70 (`rust-version` in Cargo.toml), and nothing here changes that.
+# This is the *build* toolchain, not the MSRV: the floor is rustc 1.78
+# (`rust-version` in Cargo.toml, set by Cargo.lock v4), verified by the
+# `msrv` CI job.
 [toolchain]
 channel = "1.100.0"

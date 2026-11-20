@@ -62,7 +62,8 @@ binaries), and an end-to-end pack → verify → extract run using the real
 Windows stub binary, with `SHA256SUMS.txt` checked by an external tool.
 
 Verified in CI (`.github/workflows/ci.yml`): `cargo fmt --check`,
-`cargo clippy -D warnings` and the full 61-test suite on Linux; on
+`cargo clippy -D warnings`, the full test suite and an MSRV (1.78)
+build on Linux; on
 `windows-latest`, clippy for `x86_64-pc-windows-msvc` (all targets), the
 test suite, the release `crt-static` build of all four binaries, a smoke
 run of the released CLI (`init` then `validate`), and — since this
@@ -76,7 +77,9 @@ round-trip, and how the embedded icon and version details actually
 appear) — there is no Windows host in the build environment, and CI
 compiles and lints the stub and GUI but never runs them. Treat the
 installer itself as inspection-verified only until it has been run on a
-real machine.
+real machine. When one is available,
+[`docs/windows-verification.md`](docs/windows-verification.md) is the
+step-by-step pass to run and record here.
 
 Applied by the installer stub: project-file `[[shortcuts]]` (Desktop and
 Start Menu), custom `[[registry]]` values (previous values are recorded

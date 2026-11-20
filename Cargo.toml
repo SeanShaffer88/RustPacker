@@ -10,8 +10,11 @@ members = [
 [workspace.package]
 version = "0.2.0"
 edition = "2021"
-# 1.70 is where std::sync::OnceLock stabilised; the workspace uses it.
-rust-version = "1.70"
+# The floor is set by Cargo.lock v4, which cargo older than 1.78 cannot
+# parse; the `msrv` CI job builds with exactly this toolchain so the claim
+# cannot silently rot. (It was 1.70 — for std::sync::OnceLock — until the
+# lockfile made that unbuildable in practice.)
+rust-version = "1.78"
 license = "MIT"
 authors = ["Sean Shaffer"]
 

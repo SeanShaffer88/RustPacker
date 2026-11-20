@@ -229,8 +229,8 @@ const ICON_SIZE: u32 = 32;
 /// prompt, matching the wizard's One Dark palette.
 fn icon_bytes(glyph: IconGlyph) -> Vec<u8> {
     // The AND mask is 1 bit per pixel, rows padded to 4 bytes. Written as
-    // plain arithmetic because `div_ceil` needs Rust 1.73 and the workspace
-    // supports 1.70.
+    // plain arithmetic rather than `div_ceil`: the mask layout reads more
+    // clearly when the padding is visible.
     let mask_stride = ((ICON_SIZE + 31) / 32 * 4) as usize;
     let xor_len = (ICON_SIZE * ICON_SIZE * 4) as usize;
     let and_len = mask_stride * ICON_SIZE as usize;

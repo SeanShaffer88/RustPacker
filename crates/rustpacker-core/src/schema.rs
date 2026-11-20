@@ -782,8 +782,8 @@ pub fn validate_install_dir(raw: &str) -> Result<(), String> {
     // are relative, and a reserved device name as a folder name is silently
     // unusable on Windows.
     let body = if has_drive { &path[2..] } else { path };
-    // A `[char; N]` pattern would be tidier but needs Rust 1.71; the MSRV is
-    // 1.70, so the closure stays and the lint is answered rather than obeyed.
+    // A `[char; N]` pattern would be tidier; the closure form is kept
+    // because the lint's preferred spelling buries the two separators.
     #[allow(clippy::manual_pattern_char_comparison)]
     let components_iter = body.split(|c| c == '\\' || c == '/');
     for part in components_iter {
@@ -1565,8 +1565,8 @@ mod tests {
                 out.chars().count()
             );
             assert!(
-                // Not `contains([..])`: an array of chars as a `Pattern`
-                // needs Rust 1.71 and the MSRV is 1.70.
+                // Not `contains([..])`: the closure form stays explicit
+                // about exactly which characters are forbidden.
                 !out.chars()
                     .any(|c| matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')),
                 "{raw:?} -> {out:?} still has a forbidden character"

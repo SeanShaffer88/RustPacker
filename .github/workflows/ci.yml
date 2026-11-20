@@ -76,6 +76,25 @@ jobs:
       - name: Test (workspace)
         run: cargo test --workspace
 
+  # The floor is real or it is fiction. Cargo.lock is version 4, which
+  # cargo < 1.78 cannot even parse — that, not any API choice, is what
+  # sets the 1.78 MSRV in Cargo.toml — so this job builds with exactly
+  # that toolchain and the claim cannot silently rot. It only checks
+  # (the pinned toolchain runs the tests), and RUSTUP_TOOLCHAIN is set
+  # explicitly because rust-toolchain.toml would otherwise override the
+  # job back to the pinned build toolchain.
+  msrv:
+    runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: "1.78.0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.78.0"
+      - name: Check (workspace, all targets, MSRV toolchain)
+        run: cargo check --workspace --all-targets
+
   windows-msvc:
     runs-on: windows-latest
     steps:
