@@ -1152,7 +1152,8 @@ mod imp {
                     let percent = done
                         .saturating_mul(45)
                         .checked_div(total)
-                        .map_or(20, |share| (20 + share).min(65)) as u32;
+                        .map_or(20, |share| (20 + share).min(65))
+                        as u32;
                     report(percent, &format!("Extracting {path}..."));
                     Ok(())
                 })?;

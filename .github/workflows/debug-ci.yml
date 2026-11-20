@@ -33,8 +33,6 @@ jobs:
             echo '```'
             cargo fmt --all -- --check 2>&1 | head -n 120
             echo '```'
-            echo '### resource verification (same as ci.yml)'
-            echo '```'
             shopt -s nullglob
             for f in target/x86_64-pc-windows-msvc/release/build/*/out/*.res; do
               echo "== $f"
@@ -71,6 +69,8 @@ jobs:
             exes=(target/x86_64-pc-windows-msvc/release/*.exe)
             if [ ${#exes[@]} -eq 0 ]; then echo "no binaries were built"; fi
             for exe in "${exes[@]}"; do python tools/inspect_resources.py "$exe" 2>&1; done
+            echo '```'
+            echo '### resource verification (same as ci.yml)'
             echo '```'
           } > diag.md
 

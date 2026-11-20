@@ -52,7 +52,16 @@ jobs:
         shell: bash
         run: |
           set -e
-          python tools/inspect_resources.py --res target/x86_64-pc-windows-msvc/release/build/*/out/*.res
+          shopt -s nullglob
+          res_files=(target/x86_64-pc-windows-msvc/release/build/*/out/*.res)
+          echo "found ${#res_files[@]} .res file(s)"
+          for f in "${res_files[@]}"; do
+            python tools/inspect_resources.py --res "$f"
+          done
+          if [ ${#res_files[@]} -eq 0 ]; then
+            echo "::error::build.rs produced no .res file"
+            exit 1
+          fi
           for exe in rustpacker-stub rustpacker-gui; do
             python tools/inspect_resources.py "target/x86_64-pc-windows-msvc/release/$exe.exe"
           done
