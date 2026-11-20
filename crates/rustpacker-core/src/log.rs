@@ -184,7 +184,9 @@ impl InstallLog {
 
     /// Flush and record how long the run took. Called once at the end.
     pub fn finish(&mut self, outcome: &str) {
-        self.note(&format!("---- finished: {outcome} ----"));
+        // Like the header, the footer is a separator rather than a step, so
+        // it goes through `write_line` and carries no timestamp.
+        self.write_line(&format!("---- finished: {outcome} ----"));
         if let Some(file) = self.file.as_mut() {
             let _ = file.flush();
             let _ = file.sync_data();
@@ -284,8 +286,8 @@ mod tests {
             *lines.last().expect("last"),
             "---- finished: installed ----"
         );
-        // Every entry after the header carries a timestamp.
-        for line in &lines[1..] {
+        // Every step between the header and the footer carries a timestamp.
+        for line in &lines[1..lines.len() - 1] {
             assert!(line.starts_with('+'), "no timestamp: {line:?}");
         }
         // CRLF, so Notepad does not show one long line.

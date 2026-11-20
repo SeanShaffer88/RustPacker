@@ -148,8 +148,9 @@ pub struct TrayConfig {
     pub supports_tray: bool,
     /// Argument passed when launching minimised to tray (e.g. `--tray`).
     pub tray_arg: String,
-    /// Optional distinct argument for the at-login launch. When empty,
-    /// [`TrayConfig::effective_startup_tray_arg`] falls back to `tray_arg`.
+    /// Optional distinct argument for the at-login launch. When empty or
+    /// only whitespace, [`TrayConfig::effective_startup_tray_arg`] falls
+    /// back to `tray_arg`.
     pub startup_tray_arg: String,
 }
 
@@ -216,10 +217,6 @@ impl SeenOptions {
     fn set(&mut self, bit: u8) {
         self.0 |= bit;
     }
-
-    fn clear(&mut self, bit: u8) {
-        self.0 &= !bit;
-    }
 }
 
 impl FinishSelection {
@@ -245,30 +242,26 @@ impl FinishSelection {
     ///   because the user has never had the chance to set it;
     /// * hiding and re-showing a row is therefore lossless — the second
     ///   appearance is remembered as a *return*, not a first visit;
-    /// * a sub-option whose parent is off is forced off, because leaving it
-    ///   set would make the preview promise a tray launch that cannot happen.
+    /// * a sub-option whose parent is off keeps its choice while it is
+    ///   disabled; it has no effect until the parent is on, because
+    ///   [`FinishScreenModel::launch_args`] and
+    ///   [`FinishScreenModel::login_command`] both gate on the parent.
     pub fn reseed(self, model: &FinishScreenModel, cfg: &FinishConfig) -> Self {
         let mut out = self;
         let mut seen = self.seen;
 
-        // `seed` applies the one rule an option needs: the first time it is
-        // actually shown, it takes the project's default; after that the
-        // user's choice stands.
-        fn seed(
-            value: &mut bool,
-            visible: bool,
-            bit: u8,
-            seen: &mut SeenOptions,
-            default: bool,
-        ) -> bool {
-            if !visible {
-                return false;
-            }
+        // `seed` applies the one rule an option needs: until it has
+        // actually been shown, it carries the project's default (so
+        // arbitrary initial state cannot leak through); being shown marks
+        // it seen, and after that the user's choice stands, visible or
+        // hidden.
+        fn seed(value: &mut bool, visible: bool, bit: u8, seen: &mut SeenOptions, default: bool) {
             if !seen.has(bit) {
                 *value = default;
-                seen.set(bit);
+                if visible {
+                    seen.set(bit);
+                }
             }
-            true
         }
 
         seed(
@@ -293,48 +286,30 @@ impl FinishSelection {
             cfg.launch_at_login_default,
         );
 
-        // A parent that has never been displayed still carries the project's
-        // default: the user has not had a chance to change it, and the tray
-        // sub-option below depends on this value. Without this, turning tray
-        // support on would find `login == false` and clear a sub-option whose
-        // default the project asked for.
-        if !seen.has(SeenOptions::LAUNCH) && !model.show_launch_after_setup {
-            out.launch = cfg.launch_after_setup_default;
-        }
-        if !seen.has(SeenOptions::LOGIN) && !model.show_launch_at_login {
-            out.login = cfg.launch_at_login_default;
-        }
-
         // The tray sub-options come last, because whether they can be used
         // depends on the parents above.
         //
-        // A sub-option whose parent is off is cleared but *not* marked seen:
-        // the user had no usable control, so the project's default should
-        // still apply the first time the parent is switched on. Clearing it
-        // is what stops the preview promising a tray launch that cannot
-        // happen.
-        let launch_tray_shown = seed(
+        // A sub-option whose parent is off is disabled in both surfaces,
+        // but its choice is kept: the stub does exactly this (it enables
+        // and disables the checkbox without clearing it), and clearing it
+        // here would lose the project's default — or the user's choice —
+        // before they ever had a usable control to set it with. It cannot
+        // take effect while the parent is off, because `launch_args` and
+        // `login_command` both check the parent first.
+        seed(
             &mut out.launch_tray,
             model.show_launch_tray,
             SeenOptions::LAUNCH_TRAY,
             &mut seen,
             cfg.launch_tray_default,
         );
-        if launch_tray_shown && !out.launch {
-            out.launch_tray = false;
-            seen.clear(SeenOptions::LAUNCH_TRAY);
-        }
-        let login_tray_shown = seed(
+        seed(
             &mut out.login_tray,
             model.show_login_tray,
             SeenOptions::LOGIN_TRAY,
             &mut seen,
             cfg.login_tray_default,
         );
-        if login_tray_shown && !out.login {
-            out.login_tray = false;
-            seen.clear(SeenOptions::LOGIN_TRAY);
-        }
 
         out.seen = seen;
         out
@@ -702,10 +677,12 @@ pub fn safe_file_name(raw: &str) -> String {
             out.push(c);
         }
     }
-    // Trailing dots and *whitespace* are stripped by Windows, so a name
-    // ending in either would create a folder with a different name than the
-    // one shown. `trim_end` covers every Unicode space, not just U+0020.
-    let trimmed = out.trim_end_matches(char::is_whitespace).trim_matches('.');
+    // Dots and *whitespace* at either end are stripped by Windows, so a
+    // name bounded by either would create a folder with a different name
+    // than the one shown. Trimming both character classes from both ends
+    // covers every Unicode space, not just U+0020, and mixtures such as
+    // `"  My App.  "`.
+    let trimmed = out.trim_matches(|c: char| c == '.' || c.is_whitespace());
     if trimmed.is_empty() {
         return "App".to_string();
     }
@@ -1290,8 +1267,10 @@ mod tests {
         let out = seed.reseed(&model, &cfg.finish);
         assert!(!out.desktop, "desktop takes its configured default");
         assert!(out.launch, "launch takes its configured default");
-        // The tray options are not on the page at all without tray support.
-        assert!(!out.launch_tray && !out.login_tray);
+        // The tray options are not on the page at all without tray support,
+        // so they carry their configured defaults (launch tray off, login
+        // tray on) without counting as seen.
+        assert!(!out.launch_tray && out.login_tray);
     }
 
     #[test]
@@ -1344,44 +1323,58 @@ mod tests {
         assert_eq!(user, after, "hide/show must be lossless");
     }
 
-    /// A sub-option whose parent is *off* is cleared, and deliberately not
-    /// remembered as seen: the user never had a usable control, so the
-    /// project default still applies when the parent is switched on.
+    /// A sub-option whose parent is *off* is disabled, not cleared: both
+    /// surfaces enable and disable the checkbox without unticking it, so
+    /// the choice (here, the project's default) is still there when the
+    /// parent is switched back on.
     #[test]
-    fn a_cleared_sub_option_still_takes_its_default_when_it_becomes_usable() {
+    fn a_sub_option_choice_survives_its_parent_being_toggled() {
         let mut cfg = finish_cfg(true);
         cfg.finish.launch_tray_default = true;
         let model = cfg.finish_model();
         let mut state = FinishSelection::from_defaults(&cfg.finish).reseed(&model, &cfg.finish);
         assert!(state.launch_tray, "the default applied while usable");
-        // The user turns the launch row off, which clears the sub-option.
+        // The user turns the launch row off: the sub-option is disabled,
+        // but its tick must survive.
         state.launch = false;
         state = state.reseed(&model, &cfg.finish);
-        assert!(!state.launch_tray, "cleared while the parent is off");
-        // Turning the parent back on must restore the *default*, not false.
+        assert!(state.launch_tray, "kept while the parent is off");
+        // Turning the parent back on restores exactly that choice.
         state.launch = true;
         state = state.reseed(&model, &cfg.finish);
-        assert!(
-            state.launch_tray,
-            "the project default applies again: the user never set this"
-        );
+        assert!(state.launch_tray, "the same choice is usable again");
     }
 
     #[test]
-    fn a_visible_sub_option_without_its_parent_is_cleared() {
+    fn a_sub_option_without_its_parent_has_no_effect() {
         let cfg = finish_cfg(true);
         let model = cfg.finish_model();
         let mut state = FinishSelection::from_defaults(&cfg.finish).reseed(&model, &cfg.finish);
-        // The user clears both parents but the sub-options are still ticked
-        // (which the UI prevents, but the state must not depend on that).
+        // Both parents off, both sub-options ticked. The ticks are kept
+        // (they are choices awaiting a parent), but neither may produce a
+        // tray argument: `launch_args` and `login_command` gate on the
+        // parent, which is what makes keeping the tick safe.
         state.launch = false;
         state.launch_tray = true;
         state.login = false;
         state.login_tray = true;
         let out = state.reseed(&model, &cfg.finish);
-        assert!(!out.launch_tray, "no tray argument without a launch");
-        assert!(!out.login_tray, "no tray argument without a login launch");
-        assert!(!out.launch && !out.login, "the parents keep the user's choice");
+        assert!(out.launch_tray && out.login_tray, "the ticks are kept");
+        assert!(
+            !out.launch && !out.login,
+            "the parents keep the user's choice"
+        );
+        assert!(
+            model
+                .launch_args(&cfg, out.launch, out.launch_tray)
+                .is_empty(),
+            "no tray argument without a launch"
+        );
+        assert_eq!(
+            model.login_command(&cfg, "C:\\A\\a.exe", out.login, out.login_tray),
+            None,
+            "no login command without a login launch"
+        );
     }
 
     /// L17: the finish-page decisions are small but they end up in the
@@ -1413,19 +1406,18 @@ mod tests {
             Some("\"C:\\A\\a.exe\" --tray --min")
         );
 
-        // An override that trims to nothing must not produce `"exe" ` with a
-        // trailing space. Note `effective_startup_tray_arg` only falls back to
-        // `tray_arg` when the *untrimmed* value is empty, so a tab does not
-        // fall back -- it trims to nothing and contributes no argument at all.
+        // A tab is whitespace too: a whitespace-only override falls back to
+        // `tray_arg` exactly like the spaces above, rather than trimming to
+        // nothing and silently dropping the tray argument.
         cfg.tray.startup_tray_arg = "\t".into();
         assert_eq!(
             cfg.tray.effective_startup_tray_arg(),
-            "\t",
-            "a non-empty override is returned as-is; only emptiness falls back"
+            "--tray",
+            "a whitespace-only override falls back to tray_arg"
         );
         assert_eq!(
             m.login_command(&cfg, "C:\\A\\a.exe", true, true).as_deref(),
-            Some("\"C:\\A\\a.exe\"")
+            Some("\"C:\\A\\a.exe\" --tray")
         );
 
         // Both trampoline characters reject the path: quoting cannot survive.
