@@ -156,7 +156,7 @@ fn build_res(resources: &[(u32, u32, Vec<u8>)]) -> Vec<u8> {
 
     // ---- one directory per type ----------------------------------------
     let mut leaf_cursor = leaf_dirs_off;
-    for children in types.values() {
+    for (_, children) in &types {
         write_dir_header(&mut out, 0, children.len());
         for (res_id, _) in children {
             write_dir_entry(&mut out, *res_id, (leaf_cursor as u32) | SUBDIR_FLAG);
@@ -167,7 +167,7 @@ fn build_res(resources: &[(u32, u32, Vec<u8>)]) -> Vec<u8> {
     // ---- one directory per resource name -------------------------------
     // Each has a single unnamed child whose offset points at the data entry.
     let mut data_entry_cursor = data_entries_off;
-    for children in types.values() {
+    for (_, children) in &types {
         for _ in children {
             write_dir_header(&mut out, 1, 0);
             write_dir_entry(&mut out, 0, 0); // patched below with the real offset
