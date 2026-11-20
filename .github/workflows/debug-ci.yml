@@ -88,6 +88,31 @@ jobs:
           } > c.md
           gh pr comment 6 --body-file c.md
 
+  test-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Report
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          cargo test --workspace > out.txt 2>&1
+          code=$?
+          {
+            echo "<!-- diag test-linux $code -->"
+            echo "### test linux (exit $code)"
+            echo '```'
+            sed -e 's/\x1b\[[0-9;]*m//g' out.txt \
+              | grep -E '(^test result|^error|^failures:|^---- |panicked|^ +left|^ +right|assert)' \
+              | head -n 100
+            echo '```'
+          } > c.md
+          gh pr comment 6 --body-file c.md
+
   deny:
     runs-on: ubuntu-latest
     steps:
