@@ -1,0 +1,46 @@
+# RustPacker's own installer project.
+#
+# This is the project file `release.yml` hands to `rustpacker-cli pack`, using
+# the freshly built `rustpacker-stub.exe` as the stub and the freshly built
+# `rustpacker-cli.exe` + `rustpacker-gui.exe` as the payload. In other words,
+# the RustPacker release is packed by RustPacker itself — if `pack` or the
+# stub regress, the release build fails.
+#
+# `release.yml` assembles `release/payload/` before packing, so this directory
+# only holds the text files that ship with the app.
+
+schema_version = 1
+typewriter_interval_ms = 12
+path_scope = ""
+
+[app]
+name = "RustPacker"
+version = "0.1.0"
+publisher = "Sean Shaffer"
+# Stable identifier for the Apps & Features entry and the registry keys; do
+# not change it between releases or upgrades stop replacing the old entry.
+app_id = "RustPacker"
+main_exe = "rustpacker-gui.exe"
+description = "Build single-file Windows installers, offline."
+
+[install]
+scope = "per-user"
+default_dir = "{per-user-programs}"
+source_dir = "payload"
+license_file = ""
+require_admin = false
+min_windows_build = 22000
+
+[tray]
+supports_tray = false
+tray_arg = ""
+startup_tray_arg = ""
+
+[finish]
+hide_desktop_shortcut = false
+hide_launch_after_setup = false
+desktop_shortcut_default = true
+launch_after_setup_default = true
+launch_tray_default = false
+launch_at_login_default = false
+login_tray_default = true

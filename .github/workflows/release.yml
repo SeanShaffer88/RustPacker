@@ -1,0 +1,168 @@
+name: Release
+
+# Cutting a release: bump the version, then push a tag matching `v*`.
+# The tag is the single source of truth — the workflow refuses to publish if
+# `Cargo.toml` disagrees with it, because the version strings baked into the
+# binaries and into the installer's Apps & Features entry come from there.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to publish (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          # The release notes come from the CHANGELOG, so the tag's own
+          # history must be present.
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Resolve and verify the version
+        shell: bash
+        run: |
+          set -euo pipefail
+          ref='${{ github.event.inputs.tag || github.ref_name }}'
+          tag="${ref#refs/tags/}"
+          case "$tag" in
+            v*) version="${tag#v}" ;;
+            *) echo "::error::tag '$tag' does not start with v"; exit 1 ;;
+          esac
+          manifest=$(grep -E '^version = ' Cargo.toml | head -n1 | cut -d'"' -f2)
+          echo "tag=$tag" >> "$GITHUB_ENV"
+          echo "version=$version" >> "$GITHUB_ENV"
+          if [ "$version" != "$manifest" ]; then
+            echo "::error::tag is $tag but Cargo.toml says $manifest"
+            exit 1
+          fi
+          echo "Releasing $tag (Cargo.toml agrees)"
+
+      # Build with the same flags the CI job uses, so the artifacts match what
+      # was tested. `+crt-static` comes from .cargo/config.toml.
+      - name: Build release binaries
+        run: cargo build --release --target x86_64-pc-windows-msvc --workspace
+
+      - name: Verify the binaries carry their resources
+        shell: bash
+        run: |
+          set -euo pipefail
+          for exe in rustpacker-stub rustpacker-gui; do
+            python tools/inspect_resources.py "target/x86_64-pc-windows-msvc/release/$exe.exe"
+          done
+
+      # Dogfood: the RustPacker release is packed by RustPacker. If `pack` or
+      # the stub regressed, this step fails rather than shipping a broken
+      # installer.
+      - name: Pack the release installer with RustPacker itself
+        shell: bash
+        run: |
+          set -euo pipefail
+          rel="target/x86_64-pc-windows-msvc/release"
+          cli="$rel/rustpacker-cli.exe"
+
+          mkdir -p release/payload dist
+          cp "$rel/rustpacker-cli.exe" "$rel/rustpacker-gui.exe" release/payload/
+          cp LICENSE README.md CHANGELOG.md AUDIT.md release/payload/
+
+          # `pack` names its output `<app>-v<version>-Setup.exe`, and the app
+          # name and version come from release/rustpacker.toml.
+          "$cli" validate release/rustpacker.toml
+          "$cli" pack release/rustpacker.toml \
+            --stub "$rel/rustpacker-stub.exe" \
+            --out-dir dist \
+            --portable
+
+          ls -l dist
+          # Prove the installer we just built is readable end to end.
+          setup=$(ls dist/*-Setup.exe)
+          "$cli" verify "$setup"
+          "$cli" list "$setup"
+
+      - name: Assemble the release artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          rel="target/x86_64-pc-windows-msvc/release"
+          name="RustPacker-v${version}-x64"
+
+          mkdir -p upload
+          # The standalone tools: run these from anywhere, no install needed.
+          cp "$rel/rustpacker-cli.exe" "upload/RustPacker-v${version}-x64-cli.exe"
+          cp "$rel/rustpacker-gui.exe" "upload/RustPacker-v${version}-x64-studio.exe"
+          # The installer produced by the step above (`pack` names it after the
+          # project's app name and version).
+          cp dist/RustPacker-v"${version}"-Setup.exe "upload/${name}-Setup.exe"
+          cp dist/RustPacker-v"${version}"-Portable.zip "upload/${name}-Portable.zip"
+          rm -rf dist
+
+          # One manifest covering every asset, so a downloader can check what
+          # they got. Generated last, after every file is final.
+          ( cd upload && sha256sum ./* > SHA256SUMS.txt && cat SHA256SUMS.txt )
+          mv upload/SHA256SUMS.txt .
+
+      - name: Extract release notes from the CHANGELOG
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - "${{ env.version }}" <<'PYEOF' > release-notes.md
+          import re, sys
+          version = sys.argv[1]
+          text = open("CHANGELOG.md", encoding="utf-8").read()
+          # Grab the section for this exact version: "## [x.y.z] - date" up to
+          # the next "## [" heading.
+          pattern = rf"^## \[{re.escape(version)}\].*?$(.*?)(?=^## \[|\Z)"
+          match = re.search(pattern, text, re.M | re.S)
+          if not match:
+              sys.exit(f"CHANGELOG.md has no section for {version}")
+          body = match.group(1)
+          # Drop the trailing markdown link definitions ([Unreleased]: ...).
+          body = re.split(r"^\[[^\]]+\]: ", body, flags=re.M)[0]
+          print(body.strip())
+          PYEOF
+          { cat release-notes.md; cat <<'EOF'
+
+          ---
+
+          ### Verification status
+
+          These binaries were compiled, linted and tested by CI on
+          `x86_64-pc-windows-msvc`, and the release installer was packed by
+          RustPacker itself and then re-read with `verify` and `list`. What CI
+          cannot do is *run* the installer: the wizard, the registry writes and
+          the shortcuts are verified by inspection only. Please try it on a
+          Windows 11 machine and report what breaks — [`AUDIT.md`](https://github.com/SeanShaffer88/RustPacker/blob/main/AUDIT.md)
+          tracks exactly which claims are runtime-verified and which are not.
+          EOF
+          } > release-notes-full.md
+
+      - name: Create the GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$tag" \
+            --title "RustPacker $tag" \
+            --notes-file release-notes-full.md \
+            --verify-tag \
+            upload/RustPacker-v"${version}"-x64-cli.exe \
+            upload/RustPacker-v"${version}"-x64-studio.exe \
+            upload/RustPacker-v"${version}"-x64-Setup.exe \
+            upload/RustPacker-v"${version}"-x64-Portable.zip \
+            SHA256SUMS.txt
