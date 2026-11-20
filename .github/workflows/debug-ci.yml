@@ -57,7 +57,8 @@ jobs:
             echo "<!-- diag clippy-linux $code -->"
             echo "### clippy linux (exit $code)"
             echo '```'
-            printf '%s\n' "$out" | grep -vE '^\s+(Compiling|Checking|Downloaded|Downloading|Updating|Locking|Adding|Blocking)' | head -n 150
+            printf '%s\n' "$out" | sed -e 's/\x1b\[[0-9;]*m//g' \
+              | grep -E '^(error|warning)' -A 8 | head -n 200
             echo '```'
           } > c.md
           gh pr comment 6 --body-file c.md
@@ -82,7 +83,7 @@ jobs:
             echo "<!-- diag clippy-win $code -->"
             echo "### clippy windows (exit $code)"
             echo '```'
-            grep -vE '^\s+(Compiling|Checking|Downloaded|Downloading|Updating|Locking|Adding)' out.txt | head -n 150
+            sed -e 's/\x1b\[[0-9;]*m//g' out.txt | grep -E '^(error|warning)' -A 8 | head -n 200
             echo '```'
           } > c.md
           gh pr comment 6 --body-file c.md
@@ -108,7 +109,7 @@ jobs:
             echo "<!-- diag deny $code -->"
             echo "### deny (exit $code)"
             echo '```'
-            cat out.txt | head -n 100
+            sed -e 's/\x1b\[[0-9;]*m//g' out.txt | head -n 60
             echo '```'
           } > c.md
           gh pr comment 6 --body-file c.md

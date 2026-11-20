@@ -42,8 +42,8 @@ fn main() {
 mod imp {
     use rustpacker_core::{
         extract_payload_with_progress, find_payload, read_manifest, sha256_hex, InstallJournal,
-        InstallScope, JournalAction, PayloadManifest, Prerequisite, ProjectConfig, Typewriter,
-        JOURNAL_FILE_NAME, UNINSTALLER_FILE_NAME,
+        InstallLog, InstallScope, JournalAction, PayloadManifest, Prerequisite, ProjectConfig,
+        Typewriter, JOURNAL_FILE_NAME, LOG_FILE_NAME, UNINSTALLER_FILE_NAME,
     };
     use std::cell::RefCell;
     use std::collections::HashSet;
@@ -1521,6 +1521,11 @@ mod imp {
         report(92, "Saving the install journal...");
         check_canceled()?;
         journal.record_file(&dest.join(JOURNAL_FILE_NAME).to_string_lossy());
+        // The log belongs to the install, so uninstalling removes it too. It
+        // has to be recorded even though the worker is still writing to it:
+        // rollback runs on failure and the uninstaller runs much later, and
+        // both happen after the handle is dropped.
+        journal.record_file(&dest.join(LOG_FILE_NAME).to_string_lossy());
         let journal_path = dest.join(JOURNAL_FILE_NAME);
         if let Err(e) = journal.save(&journal_path) {
             // Without a journal there is no reliable uninstaller, so the
@@ -1760,6 +1765,8 @@ mod imp {
         journal: Option<InstallJournal>,
         install_done: bool,
         install_error: Option<String>,
+        /// `--silent`: skip the confirmations a human would read.
+        silent: bool,
         /// True while the worker thread is installing: disables Back/Cancel
         /// semantics that would fight the running install.
         installing: bool,
@@ -2142,6 +2149,7 @@ mod imp {
             install_dir: install_dir.to_string(),
             payload: payload.cloned(),
             hwnd: WindowHandle(hwnd),
+            log_path: install_log_path(install_dir),
         };
         // If the thread cannot be spawned we run inline: a frozen window is
         // still better than an installer that silently does nothing.
@@ -2151,10 +2159,20 @@ mod imp {
             .is_err()
         {
             let payload_ref = payload.map(|p| &**p);
+            let mut log = InstallLog::open(&install_log_path(install_dir))
+                .unwrap_or_else(|_| InstallLog::disabled());
             let done = perform_install(cfg, install_dir, payload_ref, |percent, text| {
+                log.note(text);
                 let _ = unsafe { SendMessageW(progress, PBM_SETPOS, percent as WPARAM, 0) };
                 set_text(status, text);
             });
+            match &done {
+                Ok(_) => log.finish("installed"),
+                Err(e) => {
+                    log.error(e);
+                    log.finish("failed");
+                }
+            }
             finish_on_ui_thread(cfg, done);
         }
     }
@@ -2188,6 +2206,8 @@ mod imp {
         install_dir: String,
         payload: Option<SharedPayload>,
         hwnd: WindowHandle,
+        /// M7: where to write the step-by-step install log.
+        log_path: PathBuf,
     }
 
     /// Show the progress bar at `percent` (0–100) with `text` beside it.
@@ -2205,10 +2225,23 @@ mod imp {
             install_dir,
             payload,
             hwnd,
+            log_path,
         } = job;
+
+        // M7: one line per reported step, plus the failure reason. The log
+        // is opened on the worker so the UI thread never blocks on I/O.
+        let mut log = InstallLog::open(&log_path).unwrap_or_else(|e| {
+            eprintln!("install log unavailable: {e}");
+            InstallLog::disabled()
+        });
+        log.note(&format!(
+            "installing {} {} into {install_dir}",
+            cfg.app.name, cfg.app.version
+        ));
 
         let payload_ref = payload.as_deref();
         let outcome = perform_install(&cfg, &install_dir, payload_ref, |percent, text| {
+            log.note(&format!("{percent}% {text}"));
             // Never touch a window from here: publish the text, then let the
             // UI thread draw it. `perform_install` reports coarse steps, so
             // the bar jumps between the percentages it chooses.
@@ -2217,6 +2250,16 @@ mod imp {
             }
             hwnd.post(WM_INSTALL_PROGRESS, percent as WPARAM, 0);
         });
+        match &outcome {
+            Ok(done) => {
+                log.note(&format!("journal: {}", done.journal.install_dir));
+                log.finish("installed");
+            }
+            Err(e) => {
+                log.error(e);
+                log.finish("failed");
+            }
+        }
 
         // Park the result where the UI thread can retrieve it: an
         // `InstallOutcome` carries owned strings, so it cannot ride through
@@ -2414,18 +2457,51 @@ mod imp {
     /// A dialog failure is reported, not swallowed: silently doing nothing
     /// looks like a dead button.
     fn on_browse() {
-        let (hwnd, edit, current) = match with_state(|s| (s.hwnd, s.dir_edit, s.install_dir.clone()))
-        {
-            Some(v) => v,
-            None => return,
-        };
+        let (hwnd, edit, current) =
+            match with_state(|s| (s.hwnd, s.dir_edit, s.install_dir.clone())) {
+                Some(v) => v,
+                None => return,
+            };
         let typed = get_text(edit).trim().to_string();
         let start = if typed.is_empty() { current } else { typed };
         match pick_folder(hwnd, "Select install folder", &start) {
             Ok(Some(chosen)) => set_text(edit, &chosen),
             Ok(None) => {}
-            Err(e) => message_box(&format!("Could not open the folder picker.\r\n\r\n{e}"), "Setup", true),
+            Err(e) => message_box(
+                &format!("Could not open the folder picker.\r\n\r\n{e}"),
+                "Setup",
+                true,
+            ),
         }
+    }
+
+    /// Where this install writes its log: beside the install journal, so a
+    /// support request only needs one folder. Before the folder exists the
+    /// write fails harmlessly and `InstallLog::disabled` takes over.
+    fn install_log_path(install_dir: &str) -> PathBuf {
+        PathBuf::from(install_dir).join(LOG_FILE_NAME)
+    }
+
+    /// Ask whether to abandon the wizard. Always true under `--silent`.
+    fn confirm_cancel() -> bool {
+        // An unattended run has nobody to answer, and it asked for no UI.
+        if with_state(|s| s.silent).unwrap_or(false) {
+            return true;
+        }
+        let answer = unsafe {
+            MessageBoxW(
+                std::ptr::null_mut(),
+                pcw(&wide(
+                    "Stop the setup and exit?\n\n\
+                     Nothing has been installed yet.",
+                )),
+                pcw(&wide("Cancel Setup")),
+                // Yes/No with No as the default (MB_DEFBUTTON2), so a stray
+                // Enter keeps the wizard open rather than discarding it.
+                MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2,
+            )
+        };
+        answer == IDYES
     }
 
     fn on_back() {
@@ -2798,7 +2874,13 @@ mod imp {
                                     let _ = unsafe { DestroyWindow(hwnd) };
                                 }
                             } else {
-                                let _ = unsafe { DestroyWindow(hwnd) };
+                                // M7: cancelling throws away the wizard, so
+                                // ask first unless the user asked for an
+                                // unattended run. Nothing has been written at
+                                // this point, so there is nothing to undo.
+                                if confirm_cancel() {
+                                    let _ = unsafe { DestroyWindow(hwnd) };
+                                }
                             }
                         }
                         ID_CHK_LAUNCH => {
@@ -2882,8 +2964,9 @@ mod imp {
             .unwrap_or_default();
         let uninstall_mode =
             exe_stem.eq_ignore_ascii_case("Uninstall") || has("--uninstall") || has("/uninstall");
+        let silent = has("--silent") || has("/silent");
         if uninstall_mode {
-            return run_uninstall(has("--silent") || has("/silent"));
+            return run_uninstall(silent);
         }
         // Per-machine installs need elevation: offer a UAC re-launch
         // instead of failing at the first HKLM write. A per-user install
@@ -2914,10 +2997,10 @@ mod imp {
                 }
             }
         }
-        run_wizard()
+        run_wizard(silent)
     }
 
-    fn run_wizard() -> i32 {
+    fn run_wizard(silent: bool) -> i32 {
         // Per-Monitor DPI V2 before any window exists.
         let _ =
             unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
@@ -3006,6 +3089,7 @@ mod imp {
         let state = WizardState {
             body_full: String::new(),
             reveal_scratch: String::new(),
+            silent,
             typewriter: Typewriter::new("", interval),
             pages,
             page_index: 0,
