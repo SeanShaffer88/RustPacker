@@ -15,9 +15,9 @@ pub use journal::{
 };
 pub use payload::{
     extract_payload, find_payload, normalized_rel_str, pack_directory, pack_files, read_manifest,
-    sanitise_rel_path, sha256_hex, sha256sums_txt, verify_payload, write_stored_zip, FileEntry,
-    PackedInfo, PayloadManifest, CONFIG_ENTRY_NAME, FOOTER_LEN, MAX_ARCHIVE_LEN, MAX_FILE_COUNT,
-    OVERLAY_MAGIC,
+    sanitise_rel_path, sha256_hex, sha256sums_txt, verify_payload, write_stored_zip,
+    write_stored_zip_streaming, FileEntry, PackedInfo, PayloadManifest, ZipSource,
+    CONFIG_ENTRY_NAME, FOOTER_LEN, MAX_ARCHIVE_LEN, MAX_FILE_COUNT, OVERLAY_MAGIC,
 };
 pub use schema::{
     is_bare_filename, safe_file_name, AppInfo, FileAssociation, FinishConfig, FinishScreenModel,

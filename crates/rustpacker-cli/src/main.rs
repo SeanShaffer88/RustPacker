@@ -5,7 +5,7 @@
 //! extract the resulting `Setup.exe`. Argument parsing is hand-rolled
 //! (standard library only); `--json` selects machine-readable output.
 
-use rustpacker_core::payload::{sha256_hex, sha256sums_txt, write_stored_zip};
+use rustpacker_core::payload::{sha256_hex, sha256sums_txt, write_stored_zip_streaming, ZipSource};
 use rustpacker_core::{
     extract_payload, find_payload, pack_directory, read_manifest, safe_file_name, PayloadManifest,
     ProjectConfig,
@@ -367,42 +367,6 @@ fn join_out(dir: &Path, name: &str) -> PathBuf {
     } else {
         dir.join(name)
     }
-}
-
-/// Walk a source directory and read every file, sorted by path, with
-/// forward-slash relative paths — the same walk the packer performs.
-fn collect_source_files(dir: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
-    let mut paths: Vec<PathBuf> = Vec::new();
-    collect_files(dir, &mut paths)?;
-    paths.sort();
-    let mut out = Vec::new();
-    for path in paths {
-        let rel = match path.strip_prefix(dir) {
-            Ok(r) => r.to_string_lossy().replace('\\', "/"),
-            Err(_) => return Err("internal path error".to_string()),
-        };
-        let data =
-            fs::read(&path).map_err(|e| format!("could not read {}: {e}", path.display()))?;
-        out.push((rel, data));
-    }
-    Ok(out)
-}
-
-fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
-    let mut read = fs::read_dir(dir)
-        .map_err(|e| format!("could not list {}: {e}", dir.display()))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("could not list {}: {e}", dir.display()))?;
-    read.sort_by_key(|e| e.file_name());
-    for entry in read {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_files(&path, out)?;
-        } else if path.is_file() {
-            out.push(path);
-        }
-    }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -835,14 +799,26 @@ fn cmd_pack(args: &[String]) -> Result<CmdOk, Fail> {
     let mut portable_path: Option<PathBuf> = None;
     let mut portable_bytes: Vec<u8> = Vec::new();
     if want_portable {
-        let files = collect_source_files(&source_dir).map_err(|m| Fail::io("pack", m))?;
-        let marker = portable_marker(&cfg, files.len());
-        let mut refs: Vec<(&str, &[u8])> = Vec::new();
-        for (rel, data) in &files {
-            refs.push((rel.as_str(), data.as_slice()));
+        // The payload walk already produced the manifest; reuse it instead
+        // of walking (and reading) the whole source tree a second time. The
+        // ZIP writer streams each file from disk, so only 64 KiB per entry
+        // is resident.
+        let marker = portable_marker(&cfg, entries.len());
+        // Resolve each manifest path back to its file on disk. The paths are
+        // owned by `zip_paths` so the `ZipSource` borrows stay valid.
+        let zip_paths: Vec<PathBuf> = entries
+            .iter()
+            .map(|entry| source_dir.join(entry.path.replace('/', std::path::MAIN_SEPARATOR_STR)))
+            .collect();
+        let mut refs: Vec<(String, ZipSource<'_>)> = Vec::with_capacity(entries.len() + 1);
+        for (entry, path) in entries.iter().zip(&zip_paths) {
+            refs.push((entry.path.clone(), ZipSource::Path(path)));
         }
-        refs.push(("rustpacker-portable.txt", marker.as_bytes()));
-        portable_bytes = write_stored_zip(&refs).map_err(|m| Fail::io("pack", m))?;
+        refs.push((
+            "rustpacker-portable.txt".to_string(),
+            ZipSource::Bytes(marker.as_bytes()),
+        ));
+        portable_bytes = write_stored_zip_streaming(&refs).map_err(|m| Fail::io("pack", m))?;
         let name = format!("{app_stem}-v{version_stem}-Portable.zip");
         let path = join_out(&out_dir, &name);
         fs::write(&path, &portable_bytes)
