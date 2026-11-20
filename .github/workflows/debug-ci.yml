@@ -73,7 +73,7 @@ jobs:
             echo '### resource verification (same as ci.yml)'
             echo '```'
             set +e
-            res_files=(target/x86_64-pc-windows-msvc/release/build/*/out/*.res)
+            mapfile -t res_files < <(find target/x86_64-pc-windows-msvc/release/build -name '*.res' -path '*/out/*')
             echo "found ${#res_files[@]} .res file(s)"
             for f in "${res_files[@]}"; do
               python tools/inspect_resources.py --res "$f" 2>&1 | tail -6
