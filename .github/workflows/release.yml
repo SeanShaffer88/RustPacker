@@ -11,7 +11,11 @@ on:
     inputs:
       tag:
         description: "Existing tag to publish (e.g. v0.1.0)"
-        required: true
+        required: false
+      dry_run:
+        description: "Build and pack everything, but publish nothing"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -26,9 +30,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # On a tag push this is the tag itself. On a manual run it is the
+          # named tag, or — for a dry run — the branch the run was started
+          # from, so the release path can be exercised without publishing.
           ref: ${{ github.event.inputs.tag || github.ref }}
-          # The release notes come from the CHANGELOG, so the tag's own
-          # history must be present.
           fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@stable
@@ -39,13 +44,24 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          manifest=$(grep -E '^version = ' Cargo.toml | head -n1 | cut -d'"' -f2)
+          dry_run='${{ inputs.dry_run }}'
+          if [ "$dry_run" = "true" ]; then
+            # A dry run has no tag to check: take the version from the
+            # manifest and say what tag it *would* produce.
+            echo "DRY_RUN=true" >> "$GITHUB_ENV"
+            echo "version=$manifest" >> "$GITHUB_ENV"
+            echo "tag=v$manifest" >> "$GITHUB_ENV"
+            echo "::notice::dry run — would publish tag v$manifest; nothing will be released"
+            exit 0
+          fi
+          echo "DRY_RUN=false" >> "$GITHUB_ENV"
           ref='${{ github.event.inputs.tag || github.ref_name }}'
           tag="${ref#refs/tags/}"
           case "$tag" in
             v*) version="${tag#v}" ;;
             *) echo "::error::tag '$tag' does not start with v"; exit 1 ;;
           esac
-          manifest=$(grep -E '^version = ' Cargo.toml | head -n1 | cut -d'"' -f2)
           echo "tag=$tag" >> "$GITHUB_ENV"
           echo "version=$version" >> "$GITHUB_ENV"
           if [ "$version" != "$manifest" ]; then
@@ -152,7 +168,21 @@ jobs:
           EOF
           } > release-notes-full.md
 
+      # A dry run stops here: the artifacts are uploaded as a workflow
+      # artifact so the release path can be inspected without publishing.
+      - name: Upload artifacts (dry run)
+        if: env.DRY_RUN == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: RustPacker-v${{ env.version }}-x64-dry-run
+          path: |
+            upload/*.exe
+            upload/*.zip
+            SHA256SUMS.txt
+            release-notes-full.md
+
       - name: Create the GitHub release
+        if: env.DRY_RUN != 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
