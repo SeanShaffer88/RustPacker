@@ -51,7 +51,10 @@ jobs:
             echo '```'
             echo '### PE resource table'
             echo '```'
-            python tools/inspect_resources.py target/x86_64-pc-windows-msvc/release/*.exe 2>&1
+            shopt -s nullglob
+            exes=(target/x86_64-pc-windows-msvc/release/*.exe)
+            if [ ${#exes[@]} -eq 0 ]; then echo "no binaries were built"; fi
+            for exe in "${exes[@]}"; do python tools/inspect_resources.py "$exe" 2>&1; done
             echo '```'
           } > diag.md
 

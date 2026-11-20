@@ -126,7 +126,7 @@ const MEMORY_FLAGS: u16 = 0x0030;
 const RESOURCE_LANG: u16 = 0x0409;
 
 fn build_res(resources: &[(u32, u32, Vec<u8>)]) -> Vec<u8> {
-    let mut out: Vec<u8> = Vec::with_capacity(RES_PROLOGUE_LEN + 4096);
+    let mut out: Vec<u8> = Vec::with_capacity(RES_PROLOGUE_LEN as usize + 4096);
 
     // ---- prologue -------------------------------------------------------
     // A record-shaped header with no payload: DataSize 0, HeaderSize 32,
