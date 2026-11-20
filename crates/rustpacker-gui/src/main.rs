@@ -27,8 +27,8 @@ mod win {
         build_portable_zip, looks_like_pe, pack_directory, sha256_hex, sha256sums_txt,
     };
     use rustpacker_core::{
-        safe_file_name, FinishScreenModel, FinishSelection, InstallScope, ProjectConfig,
-        TerminalTheme,
+        safe_file_name, FileAssociation, FinishScreenModel, FinishSelection, InstallScope,
+        Prerequisite, ProcessCheck, ProjectConfig, RegistryEntry, ShortcutConfig, TerminalTheme,
     };
     use std::path::PathBuf;
 
@@ -284,8 +284,8 @@ mod win {
     /// Which list editor a control id belongs to, if any.
     fn list_kind_of(id: i32) -> Option<usize> {
         match id {
-            ID_LB_SHORTCUTS | ID_ED_SC_NAME | ID_ED_SC_LOCATION | ID_ED_SC_TARGET | ID_ED_SC_ARGS
-            | ID_BTN_SC_ADD | ID_BTN_SC_DEL => Some(LIST_SHORTCUTS),
+            ID_LB_SHORTCUTS | ID_ED_SC_NAME | ID_ED_SC_LOCATION | ID_ED_SC_TARGET
+            | ID_ED_SC_ARGS | ID_BTN_SC_ADD | ID_BTN_SC_DEL => Some(LIST_SHORTCUTS),
             ID_LB_REGISTRY | ID_CB_REG_ROOT | ID_ED_REG_KEY | ID_ED_REG_NAME | ID_ED_REG_VALUE
             | ID_BTN_REG_ADD | ID_BTN_REG_DEL => Some(LIST_REGISTRY),
             ID_LB_ASSOC | ID_ED_AS_EXT | ID_ED_AS_PROGID | ID_ED_AS_DESC | ID_ED_AS_OPENWITH
@@ -589,7 +589,14 @@ mod win {
         /// not saved into the project file.
         build_portable: bool,
         project_path: Option<PathBuf>,
+        /// The wizard page the preview is showing (Welcome/Directory/Finish).
         page: usize,
+        /// The editor page the centre of the window is showing.
+        editor_page: usize,
+        /// Which navigation groups are collapsed.
+        nav_collapsed: [bool; GROUP_COUNT],
+        /// Selected row of each list editor (-1 = none).
+        list_sel: [i32; LIST_KINDS],
         // preview finish-page checkbox states (seeded from finish defaults
         // whenever the finish model changes)
         /// The finish-page checkbox state. The re-seed rule lives in core
@@ -602,9 +609,11 @@ mod win {
         hinstance: HINSTANCE,
         c: Ctrls,
         geom_left: Rect,
+        geom_center: Rect,
         geom_right: Rect,
         geom_pv: Rect,
         font_ui: HFONT,
+        font_bold: HFONT,
         font_mono: HFONT,
         font_title: HFONT,
         brush_bg: HBRUSH,
@@ -681,6 +690,7 @@ mod win {
         fn drop(&mut self) {
             unsafe {
                 let _ = DeleteObject(self.font_ui);
+                let _ = DeleteObject(self.font_bold);
                 let _ = DeleteObject(self.font_mono);
                 let _ = DeleteObject(self.font_title);
                 let _ = DeleteObject(self.brush_surface);
@@ -766,8 +776,8 @@ mod win {
                 WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
-                1180,
-                720,
+                1340,
+                820,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
                 hinstance,
@@ -824,6 +834,8 @@ mod win {
                     create_controls(app, hwnd);
                     layout(app, hwnd);
                     apply_config_to_ui(app);
+                    set_text(app.c.lbl_center_title, PAGE_TITLES[app.editor_page]);
+                    set_text(app.c.lbl_center_hint, PAGE_HINTS[app.editor_page]);
                     refresh_preview(app);
                     set_status(
                         app,
@@ -858,7 +870,8 @@ mod win {
                     DefWindowProcW(hwnd, msg, wparam, lparam)
                 }
             }
-            WM_CTLCOLOREDIT => {
+            WM_CTLCOLOREDIT
+            | windows_sys::Win32::UI::WindowsAndMessaging::WM_CTLCOLORLISTBOX => {
                 if let Some(app) = app_ref(hwnd) {
                     color_control(app, lparam as HWND, wparam as HDC, true)
                 } else {
@@ -908,6 +921,11 @@ mod win {
         }
         if ctrl == c.toolbar || ctrl == c.pv_btn_page {
             let _ = SetTextColor(hdc, app.col_text);
+            let _ = SetBkColor(hdc, app.bg_window);
+            return app.brush_bg as LRESULT;
+        }
+        if ctrl == c.statusbar || ctrl == c.lbl_center_hint {
+            let _ = SetTextColor(hdc, app.col_muted);
             let _ = SetBkColor(hdc, app.bg_window);
             return app.brush_bg as LRESULT;
         }
@@ -1023,11 +1041,8 @@ mod win {
 
     /// An editable multi-line edit (the app description).
     unsafe fn mk_edit_multi(app: &App, parent: HWND, id: i32) -> HWND {
-        let style = WS_TABSTOP
-            | WS_BORDER
-            | (ES_MULTILINE as u32)
-            | (ES_AUTOVSCROLL as u32)
-            | WS_VSCROLL;
+        let style =
+            WS_TABSTOP | WS_BORDER | (ES_MULTILINE as u32) | (ES_AUTOVSCROLL as u32) | WS_VSCROLL;
         let h = mk(app, parent, "EDIT", "", style, 0, id);
         set_font(h, app.font_ui);
         h
@@ -1040,7 +1055,7 @@ mod win {
             parent,
             "LISTBOX",
             "",
-            WS_TABSTOP | WS_BORDER | WS_VSCROLL | LBS_NOTIFY,
+            WS_TABSTOP | WS_BORDER | WS_VSCROLL | (LBS_NOTIFY as u32),
             0,
             id,
         );
@@ -1147,13 +1162,7 @@ mod win {
         let del = mk_button(app, parent, "Remove selected", del_id);
         reg(app, add_id, add);
         reg(app, del_id, del);
-        app.c.pages[page].push(Row::new(
-            std::ptr::null_mut(),
-            add,
-            del,
-            ROW_SPLIT,
-            26,
-        ));
+        app.c.pages[page].push(Row::new(std::ptr::null_mut(), add, del, ROW_SPLIT, 26));
         row_heading(app, parent, page, "Selected entry");
         for (label, id) in fields {
             if *id == ID_CB_REG_ROOT {
@@ -1168,7 +1177,7 @@ mod win {
         use windows_sys::Win32::UI::WindowsAndMessaging::{
             AppendMenuW, CreateMenu, CreatePopupMenu, SetMenu, MF_POPUP, MF_SEPARATOR, MF_STRING,
         };
-        type HMenu = windows_sys::Win32::Foundation::HMENU;
+        type HMenu = windows_sys::Win32::UI::WindowsAndMessaging::HMENU;
         let bar = CreateMenu();
         let add = |m: HMenu, id: i32, text: &str| {
             let w = wide(text);
@@ -1319,8 +1328,7 @@ mod win {
             let lh = mk_label(app, parent, "Description", 0);
             let eh = mk_edit_multi(app, parent, ID_ED_DESCRIPTION);
             reg(app, ID_ED_DESCRIPTION, eh);
-            app.c.pages[EP_APPLICATION]
-                .push(Row::new(lh, eh, std::ptr::null_mut(), ROW_FORM, 76));
+            app.c.pages[EP_APPLICATION].push(Row::new(lh, eh, std::ptr::null_mut(), ROW_FORM, 76));
         }
 
         // Payload.
@@ -1337,7 +1345,13 @@ mod win {
             ));
             let eh = mk_edit(app, parent, ID_ED_PAYLOAD_LIST, true);
             reg(app, ID_ED_PAYLOAD_LIST, eh);
-            let mut row = Row::new(std::ptr::null_mut(), eh, std::ptr::null_mut(), ROW_FULL, 120);
+            let mut row = Row::new(
+                std::ptr::null_mut(),
+                eh,
+                std::ptr::null_mut(),
+                ROW_FULL,
+                120,
+            );
             row.fill = true;
             app.c.pages[EP_PAYLOAD].push(row);
         }
@@ -1378,7 +1392,13 @@ mod win {
             EP_INSTALL,
             "Windows 11 is build 22000. Use 0 for no minimum.",
         );
-        row_combo(app, parent, EP_INSTALL, "Install folder on PATH", ID_CB_PATH);
+        row_combo(
+            app,
+            parent,
+            EP_INSTALL,
+            "Install folder on PATH",
+            ID_CB_PATH,
+        );
         row_check(
             app,
             parent,
@@ -1478,7 +1498,12 @@ mod win {
             "Hide 'Launch after setup exits' (and its tray sub-option)",
             ID_CHK_HIDE_LAUNCH,
         );
-        row_heading(app, parent, EP_FINISH, "Starting state (the user can change these)");
+        row_heading(
+            app,
+            parent,
+            EP_FINISH,
+            "Starting state (the user can change these)",
+        );
         row_check(
             app,
             parent,
@@ -1602,20 +1627,19 @@ mod win {
             let b = mk_button(app, parent, "Build Setup.exe", ID_BTN_BUILD2);
             reg(app, ID_BTN_VALIDATE2, v);
             reg(app, ID_BTN_BUILD2, b);
-            app.c.pages[EP_BUILD].push(Row::new(
-                std::ptr::null_mut(),
-                v,
-                b,
-                ROW_SPLIT,
-                28,
-            ));
+            app.c.pages[EP_BUILD].push(Row::new(std::ptr::null_mut(), v, b, ROW_SPLIT, 28));
         }
         row_heading(app, parent, EP_BUILD, "Build log");
         {
             let eh = mk_edit(app, parent, ID_ED_STATUS, true);
             reg(app, ID_ED_STATUS, eh);
-            let mut row =
-                Row::new(std::ptr::null_mut(), eh, std::ptr::null_mut(), ROW_FULL, 120);
+            let mut row = Row::new(
+                std::ptr::null_mut(),
+                eh,
+                std::ptr::null_mut(),
+                ROW_FULL,
+                120,
+            );
             row.fill = true;
             app.c.pages[EP_BUILD].push(row);
         }

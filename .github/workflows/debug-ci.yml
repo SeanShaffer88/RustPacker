@@ -25,9 +25,9 @@ jobs:
           $report += '## fmt'
           $report += (cargo fmt --all -- --check 2>&1 | Select-Object -First 120)
           $report += '## clippy windows'
-          $report += (cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc 2>&1 | Select-Object -First 200)
+          $report += (cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc 2>&1 | Select-String -Pattern 'error|warning' | Select-Object -First 120)
           $report += '## check windows'
-          $report += (cargo check --workspace --all-targets --target x86_64-pc-windows-msvc 2>&1 | Select-Object -First 200)
+          $report += (cargo check --workspace --all-targets --target x86_64-pc-windows-msvc 2>&1 | Select-String -Pattern 'error|warning' | Select-Object -First 120)
           $report -join "`n" | Out-File -Encoding utf8 report.txt
       - name: Post report
         shell: pwsh
