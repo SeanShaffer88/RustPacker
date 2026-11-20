@@ -134,14 +134,46 @@ cargo build --release --target x86_64-pc-windows-msvc
 The workspace sets `+crt-static` for `x86_64-pc-windows-msvc` in
 `.cargo/config.toml`.
 
+## Releases
+
+Releases are cut by tag: bump `version` in `Cargo.toml`, add the matching
+section to `CHANGELOG.md`, then push a `v*` tag.
+
+```text
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+`.github/workflows/release.yml` then refuses to continue if the tag and
+`Cargo.toml` disagree, builds the workspace with the same flags CI uses,
+re-checks the embedded resources, and **packs the release installer with
+RustPacker itself** — using the freshly built stub as the stub and the
+freshly built CLI and Builder Studio as the payload. The resulting installer
+is then re-read with `verify` and `list` before anything is published, so a
+broken `pack` or stub fails the release instead of shipping.
+
+Each release carries:
+
+| Asset | What it is |
+|---|---|
+| `RustPacker-v<version>-x64-Setup.exe` | The installer, packed by RustPacker. Per-user, Windows 11 x64. |
+| `RustPacker-v<version>-x64-Portable.zip` | The same files, unpacked — no install needed. |
+| `RustPacker-v<version>-x64-cli.exe` | Standalone CLI. |
+| `RustPacker-v<version>-x64-studio.exe` | Standalone Builder Studio GUI. |
+| `SHA256SUMS.txt` | SHA-256 of every asset above. |
+
+The release notes are extracted from `CHANGELOG.md` automatically.
+
 ## Project Manifest
 
 - Tier: t1b (installer / system utility class) under the Adaptive
   Engineering Contract V4.0.
 - Stack: Rust, `windows-sys` (pure Win32), workspace crates
   `rustpacker-core`, `rustpacker-stub`, `rustpacker-cli`, `rustpacker-gui`.
-- Release shape (when released): `RustPacker-v{VERSION}-x64-Setup.exe` +
-  `RustPacker-v{VERSION}-x64-Portable.zip` + `SHA256SUMS.txt`.
+- Release shape: `RustPacker-v{VERSION}-x64-Setup.exe` +
+  `RustPacker-v{VERSION}-x64-Portable.zip` + the standalone
+  `-cli`/`-studio` binaries + `SHA256SUMS.txt`, produced by
+  `.github/workflows/release.yml` (see [Releases](#releases)).
 
 ## License
 
