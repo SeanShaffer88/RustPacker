@@ -41,7 +41,11 @@ pub struct AppInfo {
     pub glyph: IconGlyph,
 }
 
+/// Only one variant is ever constructed per binary (the stub draws `Install`,
+/// the GUI draws `Build`), but this file is compiled into both build scripts,
+/// so the other variant looks dead to `-D dead-code` in each.
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 pub enum IconGlyph {
     Install,
     Build,
@@ -105,9 +109,12 @@ const SUBDIR_FLAG: u32 = 0x8000_0000;
 /// Name field flag: the value is an ordinal id, not an offset into the names.
 const ID_FLAG: u32 = 0x8000_0000;
 
+/// `(type, [(id, data)])`, in first-seen order.
+type ResourceTree = Vec<(u32, Vec<(u32, Vec<u8>)>)>;
+
 fn build_res(resources: &[(u32, u32, Vec<u8>)]) -> Vec<u8> {
     // Resource types, in first-seen order, each with its (id, data) children.
-    let mut types: Vec<(u32, Vec<(u32, Vec<u8>)>)> = Vec::new();
+    let mut types: ResourceTree = Vec::new();
     for (res_type, res_id, data) in resources {
         match types.iter_mut().find(|(t, _)| t == res_type) {
             Some((_, children)) => children.push((*res_id, data.clone())),
@@ -209,7 +216,8 @@ fn write_dir_entry(out: &mut Vec<u8>, id: u32, offset: u32) {
 // ---------------------------------------------------------------------------
 
 fn manifest_bytes(app: &AppInfo) -> Vec<u8> {
-    let manifest = format!(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    let manifest = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <assemblyIdentity type="win32" name="{assembly}" version="1.0.0.0" processorArchitecture="*"/>
   <description>{description}</description>
@@ -426,7 +434,12 @@ fn version_info_bytes(version: &str, app: &AppInfo) -> Vec<u8> {
     let mut translation = Vec::with_capacity(4);
     translation.extend_from_slice(&0x0409u16.to_le_bytes());
     translation.extend_from_slice(&1200u16.to_le_bytes());
-    let var_file_info = vs_node(1, "VarFileInfo", None, &vs_block(0, "Translation", Some(&translation)));
+    let var_file_info = vs_node(
+        1,
+        "VarFileInfo",
+        None,
+        &vs_block(0, "Translation", Some(&translation)),
+    );
 
     // The root carries VS_FIXEDFILEINFO as its value and the two info blocks
     // as children. Only `wLength` covers the children.

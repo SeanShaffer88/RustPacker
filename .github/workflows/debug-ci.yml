@@ -11,11 +11,12 @@ permissions:
 
 jobs:
   diag:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
+          targets: x86_64-pc-windows-msvc
           components: rustfmt, clippy
 
       - name: All checks with output
@@ -24,18 +25,27 @@ jobs:
           set +e
           {
             echo '<!-- rustpacker-diag -->'
-            echo '### clippy'
-            echo '```'
-            cargo clippy --workspace --all-targets -- -D warnings 2>&1 \
-              | grep -vE '^\s+(Compiling|Checking|Finished|Downloading|Downloaded|Updating|Blocking|Locking|Adding)' | head -n 200
-            echo '```'
-            echo '### test'
-            echo '```'
-            cargo test --workspace 2>&1 | grep -vE '^\s+(Compiling|Checking|Finished|Downloading|Downloaded|Updating)' | tail -n 120
-            echo '```'
             echo '### fmt'
             echo '```'
-            cargo fmt --all -- --check 2>&1 | head -n 60
+            cargo fmt --all -- --check 2>&1 | head -n 120
+            echo '```'
+            echo '### clippy (windows target)'
+            echo '```'
+            cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings 2>&1 \
+              | grep -vE '^\s+(Compiling|Checking|Finished|Downloading|Downloaded|Updating|Blocking|Locking|Adding)' | head -n 200
+            echo '```'
+            echo '### build release (windows target)'
+            echo '```'
+            cargo build --release --target x86_64-pc-windows-msvc --workspace 2>&1 \
+              | grep -vE '^\s+(Compiling|Checking|Finished|Downloading|Downloaded|Updating)' | tail -n 60
+            echo '```'
+            echo '### embedded resources'
+            echo '```'
+            ls -l target/x86_64-pc-windows-msvc/release/*.exe 2>&1
+            echo '```'
+            echo '### PE resource table'
+            echo '```'
+            python tools/inspect_resources.py target/x86_64-pc-windows-msvc/release/*.exe 2>&1
             echo '```'
           } > diag.md
 

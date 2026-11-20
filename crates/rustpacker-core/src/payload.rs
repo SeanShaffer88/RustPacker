@@ -1602,8 +1602,7 @@ mod tests {
 
         // Cancelling aborts with the caller's reason and leaves the
         // partial output for the caller to roll back.
-        let dir2 =
-            std::env::temp_dir().join(format!("rustpacker-cancel-{}", std::process::id()));
+        let dir2 = std::env::temp_dir().join(format!("rustpacker-cancel-{}", std::process::id()));
         let mut calls = 0;
         let err = extract_payload_with_progress(&exe, &dir2, &mut |_, _, _| {
             calls += 1;

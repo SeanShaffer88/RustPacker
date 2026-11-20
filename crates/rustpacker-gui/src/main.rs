@@ -54,8 +54,7 @@ mod win {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetMessageW,
         GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, IsDialogMessageW, LoadCursorW,
-        LoadIconW, MoveWindow, PostQuitMessage, RegisterClassW, SendMessageW,
-        SetWindowLongPtrW,
+        LoadIconW, MoveWindow, PostQuitMessage, RegisterClassW, SendMessageW, SetWindowLongPtrW,
         SetWindowTextW, ShowWindow, TranslateMessage, BM_GETCHECK, BM_SETCHECK, BN_CLICKED,
         BS_AUTOCHECKBOX, BS_PUSHBUTTON, CBN_SELCHANGE, CBS_DROPDOWNLIST, CB_ADDSTRING,
         CB_GETCURSEL, CB_SETCURSEL, CREATESTRUCTW, CW_USEDEFAULT, EN_CHANGE, ES_AUTOHSCROLL,
