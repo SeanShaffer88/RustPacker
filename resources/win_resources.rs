@@ -19,11 +19,10 @@
 //!   on the taskbar, or in Apps & Features.
 //!
 //! All of it is a no-op off Windows, where the stub is only a placeholder.
-
-//! Shared `.res` emitter for the two Windows binaries.
 //!
-//! Included by each crate's `build.rs` (not a crate of its own, so the build
-//! scripts stay dependency-free and cannot drift apart).
+//! This file is shared: each crate's `build.rs` pulls it in with
+//! `#[path = "../../resources/win_resources.rs"] mod win_resources;`, so the
+//! two build scripts stay dependency-free and cannot drift apart.
 
 use std::path::PathBuf;
 
@@ -66,10 +65,11 @@ pub fn emit(app: AppInfo) {
     let version = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.1.0".into());
 
     let icon = icon_bytes(app.glyph);
+    let group = group_icon_bytes(&icon);
     let resources = [
         (RT_MANIFEST, 1u32, manifest_bytes(&app)),
-        (RT_ICON, 1, icon.clone()),
-        (RT_GROUP_ICON, 1, group_icon_bytes(&icon)),
+        (RT_ICON, 1, icon),
+        (RT_GROUP_ICON, 1, group),
         (RT_VERSION, 1, version_info_bytes(&version, &app)),
     ];
 
@@ -136,13 +136,12 @@ fn build_res(resources: &[(u32, u32, Vec<u8>)]) -> Vec<u8> {
 
     // Data section, recording each resource's offset and size as it is laid out.
     let mut data: Vec<u8> = Vec::new();
-    let mut payload_offsets: Vec<((u32, u32), u32, u32)> = Vec::new();
-    for (res_type, res_id, bytes) in resources {
-        let offset = (data_off + data.len()) as u32;
-        payload_offsets.push(((*res_type, *res_id), offset, bytes.len() as u32));
+    let mut payload_offsets: Vec<(u32, u32)> = Vec::new();
+    for (_, _, bytes) in resources {
+        payload_offsets.push(((data_off + data.len()) as u32, bytes.len() as u32));
         data.extend_from_slice(bytes);
-        let pad = (4 - (bytes.len() % 4)) % 4;
-        data.extend(std::iter::repeat(0u8).take(pad));
+        // Every payload starts 4-byte aligned, so the data entries are too.
+        data.resize(data.len() + (4 - bytes.len() % 4) % 4, 0);
     }
 
     let mut out: Vec<u8> = Vec::with_capacity(data_off + data.len());
@@ -157,7 +156,7 @@ fn build_res(resources: &[(u32, u32, Vec<u8>)]) -> Vec<u8> {
 
     // ---- one directory per type ----------------------------------------
     let mut leaf_cursor = leaf_dirs_off;
-    for (_, children) in &types {
+    for children in types.values() {
         write_dir_header(&mut out, 0, children.len());
         for (res_id, _) in children {
             write_dir_entry(&mut out, *res_id, (leaf_cursor as u32) | SUBDIR_FLAG);
@@ -168,7 +167,7 @@ fn build_res(resources: &[(u32, u32, Vec<u8>)]) -> Vec<u8> {
     // ---- one directory per resource name -------------------------------
     // Each has a single unnamed child whose offset points at the data entry.
     let mut data_entry_cursor = data_entries_off;
-    for (_, children) in &types {
+    for children in types.values() {
         for _ in children {
             write_dir_header(&mut out, 1, 0);
             write_dir_entry(&mut out, 0, 0); // patched below with the real offset
@@ -180,9 +179,9 @@ fn build_res(resources: &[(u32, u32, Vec<u8>)]) -> Vec<u8> {
     }
 
     // ---- data entries ---------------------------------------------------
-    for (_, offset, size) in &payload_offsets {
-        out.extend_from_slice(offset.to_le_bytes());
-        out.extend_from_slice(size.to_le_bytes());
+    for (offset, size) in &payload_offsets {
+        out.extend_from_slice(&offset.to_le_bytes());
+        out.extend_from_slice(&size.to_le_bytes());
         out.extend_from_slice(&0u32.to_le_bytes()); // code page
         out.extend_from_slice(&0u32.to_le_bytes()); // reserved
     }
@@ -231,8 +230,8 @@ fn manifest_bytes(app: &AppInfo) -> Vec<u8> {
   </application>
   <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
     <application>
-      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/>
-      <supportedOS Id="{1f676c76-80e1-4239-95bb-83d0f6d0da78}"/>
+      <supportedOS Id="{{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}}"/>
+      <supportedOS Id="{{1f676c76-80e1-4239-95bb-83d0f6d0da78}}"/>
     </application>
   </compatibility>
 </assembly>
@@ -252,6 +251,9 @@ const ICON_SIZE: u32 = 32;
 /// A 32×32 32bpp icon in ICO form: a dark terminal window with a green
 /// prompt, matching the wizard's One Dark palette.
 fn icon_bytes(glyph: IconGlyph) -> Vec<u8> {
+    // The AND mask is 1 bit per pixel, rows padded to 4 bytes. Written as
+    // plain arithmetic because `div_ceil` needs Rust 1.73 and the workspace
+    // supports 1.70.
     let mask_stride = ((ICON_SIZE + 31) / 32 * 4) as usize;
     let xor_len = (ICON_SIZE * ICON_SIZE * 4) as usize;
     let and_len = mask_stride * ICON_SIZE as usize;
@@ -278,7 +280,7 @@ fn icon_bytes(glyph: IconGlyph) -> Vec<u8> {
             dib.extend_from_slice(&[b, g, r, a]);
         }
     }
-    dib.extend(std::iter::repeat(0u8).take(and_len));
+    dib.resize(dib.len() + and_len, 0);
 
     let mut ico = Vec::with_capacity(6 + 16 + dib.len());
     ico.extend_from_slice(&0u16.to_le_bytes()); // reserved
@@ -487,7 +489,7 @@ fn vs_node(w_type: u16, key: &str, value: Option<&[u8]>, children: &[u8]) -> Vec
     out.extend_from_slice(&key_bytes);
     out.extend_from_slice(value_bytes);
     // The value is padded to 4 bytes; children start on that boundary.
-    out.extend(std::iter::repeat(0u8).take((4 - (out.len() % 4)) % 4));
+    out.resize(out.len() + (4 - (out.len() % 4)) % 4, 0);
     out.extend_from_slice(children);
 
     let total = out.len();
