@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.3.0] - 2026-11-20
+
 ### Changed
 
 - **Builder Studio redesign.** The Studio now uses the classic
@@ -21,6 +25,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and the build/validate/preview behaviour are unchanged. Like the rest of
   the Windows surface, the new shell awaits the Windows 11 runtime pass in
   `docs/windows-verification.md`.
+- **Slimmer release downloads.** A GitHub release now ships exactly two
+  files: the `Setup.exe` installer and the portable `.zip`. The CLI and
+  the Builder Studio are still installed by the installer (and live inside
+  the portable ZIP) — they are just no longer separate downloads, and the
+  `SHA256SUMS.txt` manifest is dropped with them.
 
 ## [0.2.0] - 2026-11-20
 
@@ -181,6 +190,7 @@ in this release:
 - `examples/demo/payload/DemoApp.exe` is a text placeholder, not a real
   executable, so the demo installs a file that will not launch.
 
-[Unreleased]: https://github.com/SeanShaffer88/RustPacker/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/SeanShaffer88/RustPacker/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/SeanShaffer88/RustPacker/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/SeanShaffer88/RustPacker/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/SeanShaffer88/RustPacker/releases/tag/v0.1.0
