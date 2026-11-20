@@ -25,7 +25,8 @@ fn main() {
 mod win {
     use rustpacker_core::payload::{pack_directory, sha256_hex, sha256sums_txt};
     use rustpacker_core::{
-        safe_file_name, FinishScreenModel, InstallScope, ProjectConfig, TerminalTheme,
+        safe_file_name, FinishScreenModel, FinishSelection, InstallScope, ProjectConfig,
+        TerminalTheme,
     };
     use std::path::PathBuf;
 
@@ -299,11 +300,9 @@ mod win {
         page: usize,
         // preview finish-page checkbox states (seeded from finish defaults
         // whenever the finish model changes)
-        pv_desktop_on: bool,
-        pv_launch_on: bool,
-        pv_launch_tray_on: bool,
-        pv_login_on: bool,
-        pv_login_tray_on: bool,
+        /// The finish-page checkbox state. The re-seed rule lives in core
+        /// (`FinishSelection::reseed`) so it is testable and shared.
+        preview: FinishSelection,
         last_model: Option<FinishScreenModel>,
         left_collapsed: bool,
         right_collapsed: bool,
@@ -319,6 +318,13 @@ mod win {
         brush_bg: HBRUSH,
         brush_surface: HBRUSH,
         brush_elevated: HBRUSH,
+        /// The colours `brush_surface`/`brush_elevated` were created from.
+        /// `WM_CTLCOLOR*` needs both the brush and a matching `SetBkColor`;
+        /// keeping the pair together is what stops the two drifting apart.
+        bg_surface: COLORREF,
+        bg_elevated: COLORREF,
+        /// The window background, for the toolbar strip.
+        bg_window: COLORREF,
         col_text: COLORREF,
         col_accent: COLORREF,
         col_muted: COLORREF,
@@ -327,17 +333,20 @@ mod win {
     impl App {
         fn new(hinstance: HINSTANCE, theme: &TerminalTheme) -> Self {
             let (font_ui, font_mono, font_title) = unsafe { make_fonts() };
+            let surface_rgb = theme.surface_rgb();
+            // L6: the two grey shades were hardcoded in `color_control`, so a
+            // project with a custom theme painted its preview in One Dark
+            // Pro's greys. They are now derived from the theme and kept next
+            // to the brushes that were built from them.
+            let elevated_rgb = TerminalTheme::parse_hex(&theme.elevated_surface_hex)
+                .unwrap_or_else(|| TerminalTheme::default().elevated_rgb());
             Self {
                 cfg: ProjectConfig::default(),
                 output_dir: "dist".to_string(),
                 stub_path: String::new(),
                 project_path: None,
                 page: PAGE_FINISH,
-                pv_desktop_on: true,
-                pv_launch_on: true,
-                pv_launch_tray_on: false,
-                pv_login_on: false,
-                pv_login_tray_on: true,
+                preview: FinishSelection::from_defaults(&ProjectConfig::default().finish),
                 last_model: None,
                 left_collapsed: false,
                 right_collapsed: false,
@@ -352,13 +361,11 @@ mod win {
                 font_title,
                 // Assigned by run() from the window-class background brush.
                 brush_bg: std::ptr::null_mut(),
-                brush_surface: unsafe { CreateSolidBrush(colorref(theme.surface_rgb())) },
-                brush_elevated: unsafe {
-                    CreateSolidBrush(colorref(
-                        TerminalTheme::parse_hex(&theme.elevated_surface_hex)
-                            .unwrap_or((0x2C, 0x31, 0x3A)),
-                    ))
-                },
+                brush_surface: unsafe { CreateSolidBrush(colorref(surface_rgb)) },
+                brush_elevated: unsafe { CreateSolidBrush(colorref(elevated_rgb)) },
+                bg_surface: colorref(surface_rgb),
+                bg_elevated: colorref(elevated_rgb),
+                bg_window: colorref(theme.background_rgb()),
                 col_text: colorref(theme.text_rgb()),
                 col_accent: colorref(theme.accent_rgb()),
                 col_muted: colorref(theme.muted_rgb()),
@@ -564,17 +571,17 @@ mod win {
         let c = &app.c;
         if ctrl == c.pv_title {
             let _ = SetTextColor(hdc, app.col_accent);
-            let _ = SetBkColor(hdc, colorref((0x2C, 0x31, 0x3A)));
+            let _ = SetBkColor(hdc, app.bg_elevated);
             return app.brush_elevated as LRESULT;
         }
         if ctrl == c.pv_body {
             let _ = SetTextColor(hdc, app.col_text);
-            let _ = SetBkColor(hdc, colorref((0x21, 0x25, 0x2B)));
+            let _ = SetBkColor(hdc, app.bg_surface);
             return app.brush_surface as LRESULT;
         }
         if ctrl == c.pv_panel {
             let _ = SetTextColor(hdc, app.col_text);
-            let _ = SetBkColor(hdc, colorref((0x2C, 0x31, 0x3A)));
+            let _ = SetBkColor(hdc, app.bg_elevated);
             return app.brush_elevated as LRESULT;
         }
         if ctrl == c.pv_desktop
@@ -584,17 +591,17 @@ mod win {
             || ctrl == c.pv_login_tray
         {
             let _ = SetTextColor(hdc, app.col_text);
-            let _ = SetBkColor(hdc, colorref((0x2C, 0x31, 0x3A)));
+            let _ = SetBkColor(hdc, app.bg_elevated);
             return app.brush_elevated as LRESULT;
         }
         if ctrl == c.toolbar || ctrl == c.pv_btn_page {
             let _ = SetTextColor(hdc, app.col_text);
-            let _ = SetBkColor(hdc, colorref((0x28, 0x2C, 0x34)));
+            let _ = SetBkColor(hdc, app.bg_window);
             return app.brush_bg as LRESULT;
         }
         if is_edit {
             let _ = SetTextColor(hdc, app.col_text);
-            let _ = SetBkColor(hdc, colorref((0x2C, 0x31, 0x3A)));
+            let _ = SetBkColor(hdc, app.bg_elevated);
             return app.brush_elevated as LRESULT;
         }
         // Labels, panels and left-panel checkboxes sit on the surface colour.
@@ -603,7 +610,7 @@ mod win {
         } else {
             let _ = SetTextColor(hdc, app.col_text);
         }
-        let _ = SetBkColor(hdc, colorref((0x21, 0x25, 0x2B)));
+        let _ = SetBkColor(hdc, app.bg_surface);
         app.brush_surface as LRESULT
     }
 
@@ -1158,16 +1165,18 @@ mod win {
                 let mut body = format!(
                     "{name} has been installed on your computer.\n\nClick Finish to close Setup."
                 );
-                if model.show_launch_after_setup && app.pv_launch_on {
-                    let args = model.launch_args(cfg, true, app.pv_launch_tray_on);
+                if model.show_launch_after_setup && app.preview.launch {
+                    let args = model.launch_args(cfg, true, app.preview.launch_tray);
                     if args.is_empty() {
                         body.push_str(&format!("\n\nOn exit: launch {}", cfg.app.main_exe));
                     } else {
                         body.push_str(&format!("\n\nOn exit: launch {} {}", cfg.app.main_exe, args.join(" ")));
                     }
                 }
-                if model.show_launch_at_login && app.pv_login_on {
-                    if let Some(cmd) = model.login_command(cfg, &exe_path, true, app.pv_login_tray_on) {
+                if model.show_launch_at_login && app.preview.login {
+                    if let Some(cmd) =
+                        model.login_command(cfg, &exe_path, true, app.preview.login_tray)
+                    {
                         body.push_str(&format!("\nAt Windows login: {cmd}"));
                     }
                 }
@@ -1179,13 +1188,19 @@ mod win {
     unsafe fn refresh_preview(app: &mut App) {
         let model = app.cfg.finish_model();
         if app.last_model.as_ref() != Some(&model) {
-            // Model changed (tray support / hidden options): re-seed the
-            // preview checkboxes from the finish-page defaults.
-            app.pv_desktop_on = app.cfg.finish.desktop_shortcut_default;
-            app.pv_launch_on = app.cfg.finish.launch_after_setup_default;
-            app.pv_launch_tray_on = app.cfg.finish.launch_tray_default;
-            app.pv_login_on = app.cfg.finish.launch_at_login_default;
-            app.pv_login_tray_on = app.cfg.finish.login_tray_default;
+            // L6: the model changing means an option became visible or hidden
+            // — turning tray support on, or hiding the launch row. Re-seeding
+            // *every* checkbox threw away the toggles the user had already
+            // made to unrelated options, so the preview silently disagreed
+            // with what they had just clicked.
+            //
+            // Freshly-appearing options now take their configured default;
+            // options that were already visible, and options that have just
+            // been hidden (so they reappear as the user left them), keep the
+            // user's choice.
+            app.preview = app
+                .preview
+                .reseed(app.last_model.as_ref(), &model, &app.cfg.finish);
             app.last_model = Some(model.clone());
         }
         let (title, body) = preview_texts(app, &model);
@@ -1199,13 +1214,13 @@ mod win {
                 _ => "Finish",
             },
         );
-        set_check(app.c.pv_desktop, app.pv_desktop_on);
-        set_check(app.c.pv_launch, app.pv_launch_on);
-        set_check(app.c.pv_launch_tray, app.pv_launch_tray_on);
-        set_check(app.c.pv_login, app.pv_login_on);
-        set_check(app.c.pv_login_tray, app.pv_login_tray_on);
-        enable(app.c.pv_launch_tray, app.pv_launch_on);
-        enable(app.c.pv_login_tray, app.pv_login_on);
+        set_check(app.c.pv_desktop, app.preview.desktop);
+        set_check(app.c.pv_launch, app.preview.launch);
+        set_check(app.c.pv_launch_tray, app.preview.launch_tray);
+        set_check(app.c.pv_login, app.preview.login);
+        set_check(app.c.pv_login_tray, app.preview.login_tray);
+        enable(app.c.pv_launch_tray, app.preview.launch);
+        enable(app.c.pv_login_tray, app.preview.login);
         position_preview_children(app);
     }
 
@@ -1303,11 +1318,11 @@ mod win {
             | ID_PV_CHK_LAUNCH_TRAY
             | ID_PV_CHK_LOGIN
             | ID_PV_CHK_LOGIN_TRAY => {
-                app.pv_desktop_on = get_check(app.c.pv_desktop);
-                app.pv_launch_on = get_check(app.c.pv_launch);
-                app.pv_launch_tray_on = get_check(app.c.pv_launch_tray);
-                app.pv_login_on = get_check(app.c.pv_login);
-                app.pv_login_tray_on = get_check(app.c.pv_login_tray);
+                app.preview.desktop = get_check(app.c.pv_desktop);
+                app.preview.launch = get_check(app.c.pv_launch);
+                app.preview.launch_tray = get_check(app.c.pv_launch_tray);
+                app.preview.login = get_check(app.c.pv_login);
+                app.preview.login_tray = get_check(app.c.pv_login_tray);
                 refresh_preview(app);
             }
             ID_PV_BTN_PAGE if app.page < PAGE_FINISH => {

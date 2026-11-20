@@ -175,6 +175,120 @@ impl TrayConfig {
     }
 }
 
+/// The finish page's checkbox state, as the preview and the wizard hold it.
+///
+/// AUDIT L6: this lived as five independent `bool`s inside the GUI, and the
+/// GUI re-seeded all of them whenever [`FinishScreenModel`] changed — which
+/// happens as soon as the user toggles tray support or hides the launch row.
+/// That threw away choices the user had just made to *unrelated* options.
+/// Keeping the state and the update rule here makes the rule testable and
+/// stops the two surfaces drifting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FinishSelection {
+    pub desktop: bool,
+    pub launch: bool,
+    pub launch_tray: bool,
+    pub login: bool,
+    pub login_tray: bool,
+}
+
+impl FinishSelection {
+    /// The state a freshly loaded project starts in: every option at its
+    /// configured default.
+    pub fn from_defaults(cfg: &FinishConfig) -> Self {
+        Self {
+            desktop: cfg.desktop_shortcut_default,
+            launch: cfg.launch_after_setup_default,
+            launch_tray: cfg.launch_tray_default,
+            login: cfg.launch_at_login_default,
+            login_tray: cfg.login_tray_default,
+        }
+    }
+
+    /// Apply a new model, preserving the user's choices.
+    ///
+    /// * an option that was visible and still is keeps the user's choice;
+    /// * an option that has just become visible starts at its default — the
+    ///   user has never seen it;
+    /// * an option that is now hidden keeps its value, so hiding and
+    ///   re-showing a row (by toggling tray support, say) is not a reset;
+    /// * a sub-option whose parent is off is forced off, because leaving it
+    ///   set would make the preview claim a tray launch that cannot happen.
+    ///
+    /// `previous` is `None` on the first call, when every option is new.
+    pub fn reseed(
+        self,
+        previous: Option<&FinishScreenModel>,
+        model: &FinishScreenModel,
+        cfg: &FinishConfig,
+    ) -> Self {
+        // One rule, applied to each option: it was visible before and is
+        // visible now -> keep the user's choice; it has just appeared ->
+        // start at the configured default; otherwise leave it alone.
+        fn apply(
+            current: bool,
+            was_visible: fn(&FinishScreenModel) -> bool,
+            previous: Option<&FinishScreenModel>,
+            now_visible: bool,
+            default: bool,
+        ) -> bool {
+            if previous.map(was_visible).unwrap_or(false) {
+                current
+            } else if now_visible {
+                default
+            } else {
+                current
+            }
+        }
+        let mut out = Self {
+            desktop: apply(
+                self.desktop,
+                |m| m.show_desktop_shortcut,
+                previous,
+                model.show_desktop_shortcut,
+                cfg.desktop_shortcut_default,
+            ),
+            launch: apply(
+                self.launch,
+                |m| m.show_launch_after_setup,
+                previous,
+                model.show_launch_after_setup,
+                cfg.launch_after_setup_default,
+            ),
+            launch_tray: apply(
+                self.launch_tray,
+                |m| m.show_launch_tray,
+                previous,
+                model.show_launch_tray,
+                cfg.launch_tray_default,
+            ),
+            login: apply(
+                self.login,
+                |m| m.show_launch_at_login,
+                previous,
+                model.show_launch_at_login,
+                cfg.launch_at_login_default,
+            ),
+            login_tray: apply(
+                self.login_tray,
+                |m| m.show_login_tray,
+                previous,
+                model.show_login_tray,
+                cfg.login_tray_default,
+            ),
+        };
+        // A tray sub-option without its parent is meaningless, and the preview
+        // would show an argument the install can never use.
+        if !out.launch {
+            out.launch_tray = false;
+        }
+        if !out.login {
+            out.login_tray = false;
+        }
+        out
+    }
+}
+
 /// Which optional checkboxes the finish page offers. An option is always
 /// offered unless explicitly hidden here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1083,6 +1197,114 @@ mod tests {
             Some("\"C:\\A\\a.exe\" --tray --at-login")
         );
         assert_eq!(m.launch_args(&cfg, true, true), vec!["--tray".to_string()]);
+    }
+
+    // ---- L6: the preview keeps the user's choices -------------------------
+
+    fn finish_cfg(tray: bool) -> ProjectConfig {
+        let mut cfg = ProjectConfig::default();
+        cfg.tray.supports_tray = tray;
+        cfg.tray.tray_arg = "--tray".into();
+        cfg
+    }
+
+    #[test]
+    fn first_reseed_seeds_every_option_from_the_defaults() {
+        let mut cfg = finish_cfg(false);
+        cfg.finish.desktop_shortcut_default = false;
+        cfg.finish.launch_after_setup_default = true;
+        let model = cfg.finish_model();
+        // A selection that is nonsense everywhere: reseed must overwrite it.
+        let seed = FinishSelection {
+            desktop: true,
+            launch: false,
+            launch_tray: true,
+            login: true,
+            login_tray: true,
+        };
+        let out = seed.reseed(None, &model, &cfg.finish);
+        assert!(!out.desktop);
+        assert!(out.launch);
+        // Tray options are not visible without tray support.
+        assert!(!out.login && !out.login_tray);
+    }
+
+    #[test]
+    fn reseed_keeps_user_choices_when_an_unrelated_option_changes() {
+        let cfg = finish_cfg(true);
+        let model = cfg.finish_model();
+        // The user turned the desktop shortcut off and the login launch on.
+        let user = FinishSelection {
+            desktop: false,
+            launch: true,
+            launch_tray: false,
+            login: true,
+            login_tray: false,
+        };
+        // Now they hide the launch row -- the model changes, but the desktop
+        // and login choices have nothing to do with it.
+        let mut hidden = cfg.clone();
+        hidden.finish.hide_launch_after_setup = true;
+        let hidden_model = hidden.finish_model();
+        let out = user.reseed(Some(&model), &hidden_model, &hidden.finish);
+        assert!(!out.desktop, "desktop choice must survive");
+        assert!(out.login, "login choice must survive");
+        assert!(!out.login_tray, "login tray choice must survive");
+    }
+
+    #[test]
+    fn an_option_that_appears_starts_at_its_default() {
+        // Tray support is off, so the tray options are not on the page yet.
+        let mut cfg = finish_cfg(false);
+        cfg.finish.login_tray_default = true;
+        let model = cfg.finish_model();
+        let before = FinishSelection::from_defaults(&cfg.finish);
+        assert!(!model.show_launch_at_login);
+        // The user turns tray support on in the builder.
+        cfg.tray.supports_tray = true;
+        let after = cfg.finish_model();
+        let out = before.reseed(Some(&model), &after, &cfg.finish);
+        assert!(out.login_tray, "a new option takes its configured default");
+    }
+
+    #[test]
+    fn hiding_then_showing_an_option_is_not_a_reset() {
+        let cfg = finish_cfg(true);
+        let model = cfg.finish_model();
+        let user = FinishSelection {
+            desktop: true,
+            launch: true,
+            launch_tray: true,
+            login: false,
+            login_tray: false,
+        };
+        // Hide the launch row, then bring it back.
+        let mut hidden = cfg.clone();
+        hidden.finish.hide_launch_after_setup = true;
+        let hidden_model = hidden.finish_model();
+        let during = user.reseed(Some(&model), &hidden_model, &hidden.finish);
+        let after = during.reseed(Some(&hidden_model), &model, &cfg.finish);
+        assert!(after.launch, "the launch choice came back");
+        assert_eq!(user, after, "hide/show must be lossless");
+    }
+
+    #[test]
+    fn a_sub_option_without_its_parent_is_forced_off() {
+        let cfg = finish_cfg(true);
+        let model = cfg.finish_model();
+        // The user ticked the tray sub-options, then cleared the parents.
+        let user = FinishSelection {
+            desktop: true,
+            launch: false,
+            launch_tray: true,
+            login: false,
+            login_tray: true,
+        };
+        let out = user.reseed(Some(&model), &model, &cfg.finish);
+        assert!(!out.launch_tray, "no tray argument without a launch");
+        assert!(!out.login_tray, "no tray argument without a login launch");
+        // The parents themselves keep the user's choice.
+        assert!(!out.launch && !out.login);
     }
 
     /// L17: the finish-page decisions are small but they end up in the
