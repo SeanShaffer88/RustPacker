@@ -62,14 +62,18 @@ binaries), and an end-to-end pack → verify → extract run using the real
 Windows stub binary, with `SHA256SUMS.txt` checked by an external tool.
 
 Verified in CI (`.github/workflows/ci.yml`): `cargo fmt --check`,
-`cargo clippy -D warnings` and the full test suite on Linux; on
+`cargo clippy -D warnings` and the full 61-test suite on Linux; on
 `windows-latest`, clippy for `x86_64-pc-windows-msvc` (all targets), the
-test suite, the release `crt-static` build of all four binaries, and a
-smoke run of the released CLI (`init` then `validate`).
+test suite, the release `crt-static` build of all four binaries, a smoke
+run of the released CLI (`init` then `validate`), and — since this
+version — a resource check that parses the PE resource directory of
+`rustpacker-stub.exe` and `rustpacker-gui.exe` and fails if the manifest,
+version info, icon or icon group is missing.
 
 Unverified: all Windows 11 **runtime** behaviour (wizard rendering,
 typewriter feel, shortcut creation, registry writes, install/uninstall
-round-trip) — there is no Windows host in the build environment, and CI
+round-trip, and how the embedded icon and version details actually
+appear) — there is no Windows host in the build environment, and CI
 compiles and lints the stub and GUI but never runs them. Treat the
 installer itself as inspection-verified only until it has been run on a
 real machine.
@@ -96,6 +100,11 @@ Install safety, as of this version:
 - Uninstall refuses a journal whose paths lie outside the recorded install
   folder, and the running `Uninstall.exe` is scheduled for deletion on the
   next reboot.
+- The install runs on a worker thread, so the window keeps repainting and
+  Cancel stays live. Cancelling is cooperative: it is checked before each
+  step and before each payload entry, never mid-write, so the journal
+  always describes every completed change and the rollback stays exact.
+  Extraction reports bytes and drives the progress bar.
 
 Still open: the wizard pages themselves (license text rendering, progress
 detail) are minimal, and no automated test exercises Win32 APIs — the
