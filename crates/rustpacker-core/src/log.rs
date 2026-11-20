@@ -73,6 +73,18 @@ pub struct InstallLog {
     written: u64,
 }
 
+impl std::fmt::Debug for InstallLog {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `File` is Debug, but printing an open handle says nothing useful;
+        // the path and whether writing works is what a failure message needs.
+        f.debug_struct("InstallLog")
+            .field("path", &self.path)
+            .field("open", &self.file.is_some())
+            .field("failed", &self.failed)
+            .finish()
+    }
+}
+
 impl InstallLog {
     /// Open (or create) the log at `path`, recording the header line.
     ///
@@ -188,6 +200,7 @@ impl InstallLog {
 /// Used when the install directory is not writable yet (the very first steps
 /// happen before the folder exists), so early failures still leave a trace in
 /// the console for `--silent` runs launched from a terminal.
+#[derive(Debug)]
 pub struct StderrLog {
     started: Instant,
     lines: Vec<String>,

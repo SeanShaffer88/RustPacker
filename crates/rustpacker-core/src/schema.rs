@@ -626,7 +626,11 @@ pub fn validate_install_dir(raw: &str) -> Result<(), String> {
     // unusable on Windows.
     let body = if has_drive { &path[2..] } else { path };
     let mut components = 0usize;
-    for part in body.split(|c| c == '\\' || c == '/') {
+    // A `[char; N]` pattern would be tidier but needs Rust 1.71; the MSRV is
+    // 1.70, so the closure stays and the lint is answered rather than obeyed.
+    #[allow(clippy::manual_pattern_char_comparison)]
+    let components_iter = body.split(|c| c == '\\' || c == '/');
+    for part in components_iter {
         if part.is_empty() {
             continue;
         }
@@ -977,7 +981,7 @@ mod tests {
             match validate_install_dir(input) {
                 Ok(()) => panic!("{input:?} should have been rejected"),
                 Err(msg) => assert!(
-                    msg.to_lowercase().contains(needle.to_lowercase()),
+                    msg.to_lowercase().contains(&needle.to_lowercase()),
                     "{input:?} produced {msg:?}, expected it to mention {needle:?}"
                 ),
             }
