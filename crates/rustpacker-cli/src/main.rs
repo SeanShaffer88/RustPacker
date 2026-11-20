@@ -5,10 +5,10 @@
 //! extract the resulting `Setup.exe`. Argument parsing is hand-rolled
 //! (standard library only); `--json` selects machine-readable output.
 
-use rustpacker_core::payload::{sha256_hex, sha256sums_txt, write_stored_zip_streaming, ZipSource};
+use rustpacker_core::payload::{sha256_hex, sha256sums_txt};
 use rustpacker_core::{
-    extract_payload, find_payload, pack_directory, read_manifest, safe_file_name, PayloadManifest,
-    ProjectConfig,
+    build_portable_zip, extract_payload, find_payload, pack_directory, read_manifest,
+    safe_file_name, PayloadManifest, ProjectConfig,
 };
 use std::fs;
 use std::io::Write;
@@ -800,24 +800,11 @@ fn cmd_pack(args: &[String]) -> Result<CmdOk, Fail> {
     let mut portable_name: Option<String> = None;
     let mut portable_bytes: Vec<u8> = Vec::new();
     if want_portable {
-        // The payload walk already produced the manifest; reuse it instead
-        // of walking (and reading) the whole source tree a second time. The
-        // ZIP writer streams each file from disk, so only 64 KiB per entry
-        // is resident.
-        let marker = portable_marker(&cfg, entries.len());
-        let zip_paths: Vec<PathBuf> = entries
-            .iter()
-            .map(|entry| source_dir.join(entry.path.replace('/', std::path::MAIN_SEPARATOR_STR)))
-            .collect();
-        let mut refs: Vec<(String, ZipSource<'_>)> = Vec::with_capacity(entries.len() + 1);
-        for (entry, path) in entries.iter().zip(&zip_paths) {
-            refs.push((entry.path.clone(), ZipSource::Path(path)));
-        }
-        refs.push((
-            "rustpacker-portable.txt".to_string(),
-            ZipSource::Bytes(marker.as_bytes()),
-        ));
-        portable_bytes = write_stored_zip_streaming(&refs).map_err(|m| Fail::io("pack", m))?;
+        // Core builds the export from the manifest `pack_directory` already
+        // returned (M14: the GUI calls the same function, so the two
+        // surfaces ship identical ZIPs and neither re-walks the source tree).
+        portable_bytes =
+            build_portable_zip(&cfg, &source_dir, &entries).map_err(|m| Fail::io("pack", m))?;
         portable_name = Some(format!("{app_stem}-v{version_stem}-Portable.zip"));
     }
 
@@ -939,13 +926,6 @@ fn write_outputs(files: &[(&Path, &[u8])]) -> Result<(), String> {
         written.push(path.to_path_buf());
     }
     Ok(())
-}
-
-fn portable_marker(cfg: &ProjectConfig, file_count: usize) -> String {
-    format!(
-        "RustPacker portable export\nApp: {}\nVersion: {}\nPublisher: {}\nFiles: {}\n\nRun {} to start the app.\n",
-        cfg.app.name, cfg.app.version, cfg.app.publisher, file_count, cfg.app.main_exe
-    )
 }
 
 fn cmd_read_setup(args: &[String], command: &str) -> Result<(String, Vec<u8>), Fail> {

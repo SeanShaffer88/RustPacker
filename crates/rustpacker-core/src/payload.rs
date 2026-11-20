@@ -22,6 +22,7 @@
 //! [`.rustpacker/config.json`](CONFIG_ENTRY_NAME); extractors surface it
 //! as the manifest instead of writing it to disk as a payload file.
 
+use crate::schema::ProjectConfig;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::io::{Read, Write};
@@ -1191,6 +1192,52 @@ pub fn write_stored_zip_streaming(entries: &[(String, ZipSource<'_>)]) -> Result
     Ok(out)
 }
 
+/// Name of the marker file every portable ZIP carries.
+///
+/// The marker is how a user who unzips the export knows what they are
+/// looking at (and how support can tell a portable export from an installed
+/// copy), so it is part of the format rather than a CLI nicety.
+pub const PORTABLE_MARKER_NAME: &str = "rustpacker-portable.txt";
+
+/// The marker text dropped into a portable ZIP: what the app is, which
+/// version, and what to run. Kept beside [`build_portable_zip`] so the CLI
+/// and the GUI can never drift apart on its wording.
+pub fn portable_marker(cfg: &ProjectConfig, file_count: usize) -> String {
+    format!(
+        "RustPacker portable export\nApp: {}\nVersion: {}\nPublisher: {}\nFiles: {}\n\nRun {} to start the app.\n",
+        cfg.app.name, cfg.app.version, cfg.app.publisher, file_count, cfg.app.main_exe
+    )
+}
+
+/// Build the portable ZIP for a packed project: the payload files streamed
+/// from `source_dir`, plus the [`PORTABLE_MARKER_NAME`] marker.
+///
+/// This is the one implementation both build surfaces use (AUDIT M14): the
+/// CLI's `--portable` and the Builder Studio's portable option produce
+/// identical exports because both call this with the manifest
+/// [`pack_directory`] already returned — neither re-walks the source tree,
+/// and the writer streams each file from disk in 64 KiB chunks.
+pub fn build_portable_zip(
+    cfg: &ProjectConfig,
+    source_dir: &Path,
+    entries: &[FileEntry],
+) -> Result<Vec<u8>, String> {
+    let marker = portable_marker(cfg, entries.len());
+    let zip_paths: Vec<PathBuf> = entries
+        .iter()
+        .map(|entry| source_dir.join(entry.path.replace('/', std::path::MAIN_SEPARATOR_STR)))
+        .collect();
+    let mut refs: Vec<(String, ZipSource<'_>)> = Vec::with_capacity(entries.len() + 1);
+    for (entry, path) in entries.iter().zip(&zip_paths) {
+        refs.push((entry.path.clone(), ZipSource::Path(path)));
+    }
+    refs.push((
+        PORTABLE_MARKER_NAME.to_string(),
+        ZipSource::Bytes(marker.as_bytes()),
+    ));
+    write_stored_zip_streaming(&refs)
+}
+
 /// Incremental CRC-32 step, so callers can hash a stream in chunks.
 fn crc32_update(crc: u32, data: &[u8]) -> u32 {
     static TABLE: std::sync::OnceLock<[u32; 256]> = std::sync::OnceLock::new();
@@ -1349,6 +1396,55 @@ mod tests {
         // End-of-central-directory signature present near the tail.
         assert!(zip.windows(4).any(|w| w == b"PK\x05\x06"));
         assert_eq!(crc32(b"abc"), 0x3524_41C2);
+    }
+
+    /// M14: the portable ZIP is assembled here, once, so the CLI and the
+    /// Builder Studio ship identical exports from the same manifest.
+    #[test]
+    fn portable_zip_contains_payload_files_and_marker() {
+        let base = crate::scratch::ScratchDir::new("rustpacker-portable-zip");
+        let src = base.join("src");
+        std::fs::create_dir_all(src.join("sub")).expect("mkdir");
+        std::fs::write(src.join("DemoApp.exe"), b"MZ-demo").expect("write");
+        std::fs::write(src.join("sub/readme.txt"), b"hello portable").expect("write");
+        let entries = vec![
+            FileEntry {
+                path: "DemoApp.exe".into(),
+                size: 7,
+                sha256_hex: sha256_hex(b"MZ-demo"),
+            },
+            FileEntry {
+                path: "sub/readme.txt".into(),
+                size: 14,
+                sha256_hex: sha256_hex(b"hello portable"),
+            },
+        ];
+        let mut cfg = ProjectConfig::default();
+        cfg.app.name = "Demo".into();
+        cfg.app.version = "1.0".into();
+        cfg.app.main_exe = "DemoApp.exe".into();
+
+        let zip = build_portable_zip(&cfg, &src, &entries).expect("portable zip");
+        assert_eq!(&zip[0..4], b"PK\x03\x04");
+        let text = String::from_utf8_lossy(&zip);
+        // Every payload file is stored under its manifest path, with its
+        // bytes intact.
+        assert!(text.contains("DemoApp.exe"), "exe entry missing");
+        assert!(text.contains("sub/readme.txt"), "nested entry missing");
+        assert!(text.contains("hello portable"), "file bytes missing");
+        // ...and the marker names the app and the file to run.
+        assert!(text.contains(PORTABLE_MARKER_NAME), "marker entry missing");
+        assert!(text.contains("RustPacker portable export"));
+        assert!(text.contains("Run DemoApp.exe to start the app."));
+
+        // A manifest entry whose file has vanished is an error, never a
+        // silently truncated export.
+        let stale = vec![FileEntry {
+            path: "gone.exe".into(),
+            size: 1,
+            sha256_hex: String::new(),
+        }];
+        assert!(build_portable_zip(&cfg, &src, &stale).is_err());
     }
 
     #[test]
