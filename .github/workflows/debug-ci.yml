@@ -72,6 +72,17 @@ jobs:
             echo '```'
             echo '### resource verification (same as ci.yml)'
             echo '```'
+            set +e
+            res_files=(target/x86_64-pc-windows-msvc/release/build/*/out/*.res)
+            echo "found ${#res_files[@]} .res file(s)"
+            for f in "${res_files[@]}"; do
+              python tools/inspect_resources.py --res "$f" 2>&1 | tail -6
+            done
+            for exe in rustpacker-stub rustpacker-gui; do
+              echo "== $exe.exe"
+              python tools/inspect_resources.py "target/x86_64-pc-windows-msvc/release/$exe.exe" 2>&1 | tail -8
+            done
+            echo '```'
           } > diag.md
 
       - name: Post diagnostics
