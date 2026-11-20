@@ -276,6 +276,13 @@ impl FinishScreenModel {
         }
         if start_in_tray && self.show_login_tray {
             let arg = cfg.tray.effective_startup_tray_arg().trim();
+            // A fragment starting with a quote would close the exe path's
+            // quoting early, so `"C:\a.exe" " b` becomes two broken
+            // arguments. Reject it rather than emit a Run value Windows will
+            // fail to launch.
+            if arg.starts_with('"') {
+                return None;
+            }
             if arg.is_empty() {
                 Some(format!("\"{exe_path}\""))
             } else {
@@ -1072,6 +1079,99 @@ mod tests {
             Some("\"C:\\A\\a.exe\" --tray --at-login")
         );
         assert_eq!(m.launch_args(&cfg, true, true), vec!["--tray".to_string()]);
+    }
+
+    /// L17: the finish-page decisions are small but they end up in the
+    /// registry, where a wrong value means an app that silently fails to start
+    /// at login. These cases pin the edges.
+    #[test]
+    fn login_command_edges() {
+        let mut cfg = ProjectConfig::default();
+        cfg.tray.supports_tray = true;
+        cfg.tray.tray_arg = "--tray".into();
+        let m = cfg.finish_model();
+
+        // Not chosen, or not offered: no command at all (not an empty one).
+        assert_eq!(m.login_command(&cfg, "C:\\A\\a.exe", false, true), None);
+
+        // Whitespace-only override falls back to tray_arg, and the fallback is
+        // trimmed: a Run value must not carry stray spaces.
+        cfg.tray.startup_tray_arg = "   ".into();
+        assert_eq!(cfg.tray.effective_startup_tray_arg(), "--tray");
+        assert_eq!(
+            m.login_command(&cfg, "C:\\A\\a.exe", true, true).as_deref(),
+            Some("\"C:\\A\\a.exe\" --tray")
+        );
+
+        // An override that itself carries padding is trimmed before embedding.
+        cfg.tray.startup_tray_arg = "  --tray --min  ".into();
+        assert_eq!(
+            m.login_command(&cfg, "C:\\A\\a.exe", true, true).as_deref(),
+            Some("\"C:\\A\\a.exe\" --tray --min")
+        );
+
+        // An override of only whitespace after trimming must not produce
+        // `"exe" ` with a trailing space.
+        cfg.tray.startup_tray_arg = "\t".into();
+        assert_eq!(
+            m.login_command(&cfg, "C:\\A\\a.exe", true, true).as_deref(),
+            Some("\"C:\\A\\a.exe\"")
+        );
+
+        // Both trampoline characters reject the path: quoting cannot survive.
+        assert_eq!(m.login_command(&cfg, "C:\\a\"b.exe", true, true), None);
+        assert_eq!(m.login_command(&cfg, "C:\\a\nb.exe", true, true), None);
+        assert_eq!(m.login_command(&cfg, "C:\\a\tb.exe", true, true), None);
+
+        // A fragment starting with a quote would close the exe's quoting.
+        cfg.tray.startup_tray_arg = "\"--tray\"".into();
+        assert_eq!(m.login_command(&cfg, "C:\\A\\a.exe", true, true), None);
+
+        // Spaces in the exe path are fine: the path is quoted.
+        cfg.tray.startup_tray_arg = String::new();
+        assert_eq!(
+            m.login_command(&cfg, "C:\\Program Files\\My App\\a.exe", true, true)
+                .as_deref(),
+            Some("\"C:\\Program Files\\My App\\a.exe\" --tray")
+        );
+    }
+
+    #[test]
+    fn launch_args_edges() {
+        let mut cfg = ProjectConfig::default();
+        cfg.tray.supports_tray = true;
+        cfg.tray.tray_arg = "--tray".into();
+        let m = cfg.finish_model();
+
+        // Nothing to pass when launching normally.
+        assert!(m.launch_args(&cfg, true, false).is_empty());
+        // Nothing when the user declined the launch.
+        assert!(m.launch_args(&cfg, false, true).is_empty());
+        // The tray argument is a *fragment*: it splits on whitespace.
+        cfg.tray.tray_arg = "  --tray   --minimized  ".into();
+        assert_eq!(
+            m.launch_args(&cfg, true, true),
+            vec!["--tray".to_string(), "--minimized".to_string()]
+        );
+        // An empty or whitespace-only tray_arg contributes no arguments --
+        // never a single empty argument, which the app would see as "".
+        for blank in ["", "   ", "\t"] {
+            cfg.tray.tray_arg = blank.into();
+            assert!(
+                m.launch_args(&cfg, true, true).is_empty(),
+                "{blank:?} produced arguments"
+            );
+        }
+        // Hidden options are never applied even if the caller asks for them.
+        // Hiding the launch row also hides its tray sub-option.
+        cfg.tray.tray_arg = "--tray".into();
+        let mut no_launch = cfg.clone();
+        no_launch.finish.hide_launch_after_setup = true;
+        let no_launch_model = no_launch.finish_model();
+        assert!(!no_launch_model.show_launch_tray);
+        assert!(no_launch_model
+            .launch_args(&no_launch, true, true)
+            .is_empty());
     }
 
     #[test]

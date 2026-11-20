@@ -525,6 +525,24 @@ fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
 }
 
 /// Locate and verify the payload footer of a packed exe.
+/// Strip the RustPacker payload from a packed installer, leaving the stub.
+///
+/// AUDIT L16: the uninstaller used to be a byte-for-byte copy of `Setup.exe`,
+/// so every install kept a second copy of the whole payload on disk purely to
+/// delete the first one. The payload is a pure overlay — starting at
+/// `payload_offset` and running to the end of the file — so the uninstaller
+/// only needs everything *before* it. The result is the original stub, which
+/// knows how to uninstall from the journal and simply has nothing to install.
+///
+/// Returns `None` when `exe` carries no payload, which is exactly the case
+/// when the process *is* already an uninstaller: the caller should copy
+/// itself unchanged.
+pub fn strip_payload(exe: &[u8]) -> Option<Vec<u8>> {
+    let info = find_payload(exe).ok()?;
+    let end = usize::try_from(info.payload_offset).ok()?;
+    Some(exe[..end].to_vec())
+}
+
 pub fn find_payload(exe: &[u8]) -> Result<PackedInfo, String> {
     if exe.len() < FOOTER_LEN {
         return Err("file is too small to carry a RustPacker payload".into());
@@ -1210,6 +1228,28 @@ mod tests {
         let mut v = b"MZ".to_vec();
         v.extend(std::iter::repeat(0u8).take(512));
         v
+    }
+
+    #[test]
+    fn strip_payload_leaves_the_stub_untouched() {
+        let stub_bytes = stub();
+        let exe = pack_files(
+            &stub_bytes,
+            vec![("app.exe".into(), b"binary-bytes".to_vec())],
+            "{\"app\":{}}",
+        )
+        .expect("pack");
+        let stripped = strip_payload(&exe).expect("packed file has a payload");
+        assert_eq!(
+            stripped, stub_bytes,
+            "stripping must reproduce the original stub byte for byte"
+        );
+        assert_eq!(stripped.len(), find_payload(&exe).expect("find").payload_offset as usize);
+        // Very much smaller: this is the L16 saving.
+        assert!(stripped.len() < exe.len());
+        // An already-stripped file has no payload, so there is nothing to do.
+        assert!(strip_payload(&stripped).is_none());
+        assert!(strip_payload(b"tiny").is_none());
     }
 
     #[test]

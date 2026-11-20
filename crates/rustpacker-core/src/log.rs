@@ -127,11 +127,7 @@ impl InstallLog {
 
     /// Append one line. Returns whether it reached the file.
     pub fn note(&mut self, message: &str) -> bool {
-        let elapsed = self
-            .started
-            .elapsed()
-            .as_millis()
-            .min(u64::MAX as u128) as u64;
+        let elapsed = self.started.elapsed().as_millis().min(u64::MAX as u128) as u64;
         self.write_line(&format_entry(elapsed, message))
     }
 
@@ -241,7 +237,10 @@ mod tests {
         // Embedded newlines would split one entry across lines.
         let line = format_entry(1234, "first\nsecond\ttabbed");
         assert!(!line.contains('\n'), "{line:?}");
-        assert!(!line.contains('\t') || line.matches('\t').count() == 1, "{line:?}");
+        assert!(
+            !line.contains('\t') || line.matches('\t').count() == 1,
+            "{line:?}"
+        );
         assert!(line.starts_with("+1234ms\t"));
         // Surrounding whitespace is trimmed so entries line up.
         assert_eq!(format_entry(5, "  spaced  "), "+5ms\tspaced");
@@ -294,10 +293,7 @@ mod tests {
         assert!(text.contains("run one"), "{text}");
         assert!(text.contains("run two"), "{text}");
         // Two headers, one per run: the log shows when each install began.
-        assert_eq!(
-            text.matches("---- RustPacker install log ----").count(),
-            2
-        );
+        assert_eq!(text.matches("---- RustPacker install log ----").count(), 2);
     }
 
     #[test]

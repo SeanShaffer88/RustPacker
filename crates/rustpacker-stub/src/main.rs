@@ -1397,7 +1397,7 @@ mod imp {
         report(65, "Installing the uninstaller...");
         check_canceled()?;
         let uninstaller = dest.join(UNINSTALLER_FILE_NAME);
-        std::fs::copy(&own_exe, &uninstaller)
+        write_uninstaller(&own_exe, &uninstaller)
             .map_err(|e| format!("could not install the uninstaller: {e}"))?;
         journal.record_file(&uninstaller.to_string_lossy());
 
@@ -2473,6 +2473,29 @@ mod imp {
                 true,
             ),
         }
+    }
+
+    /// Write `Uninstall.exe` beside the installed app.
+    ///
+    /// L16: this used to be a straight copy of the whole installer, which
+    /// meant every install kept a second copy of the entire payload on disk
+    /// just so it could delete the first one. The payload is a pure overlay,
+    /// so the uninstaller only needs the stub image in front of it — the same
+    /// binary, minus the archive it would install. Uninstall mode is chosen
+    /// from the file name (`Uninstall*.exe`), not from the payload, so the
+    /// stripped copy uninstalls exactly as the full copy did.
+    ///
+    /// If this executable has no payload (it is already an uninstaller being
+    /// re-run, or a demo build), the copy is byte-for-byte.
+    fn write_uninstaller(own_exe: &Path, dest: &Path) -> std::io::Result<()> {
+        let bytes = std::fs::read(own_exe)?;
+        match rustpacker_core::strip_payload(&bytes) {
+            Some(stub_only) => std::fs::write(dest, stub_only),
+            None => std::fs::write(dest, &bytes),
+        }
+        // `strip_payload` failing and copying the whole file is deliberate:
+        // an uninstaller that is too big is harmless, one that is truncated
+        // would strand the install.
     }
 
     /// Where this install writes its log: beside the install journal, so a
