@@ -46,10 +46,15 @@ mod win {
         SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     };
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
+    /// Icon resource id, as embedded by `build.rs`. `LoadIconW` takes a
+    /// `PCWSTR`, so an integer id is cast through a pointer (windows-sys does
+    /// not export the `MAKEINTRESOURCE` macro).
+    const APP_ICON_ID: windows_sys::core::PCWSTR = 1 as _;
+
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetMessageW,
         GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, IsDialogMessageW, LoadCursorW,
-        MoveWindow, PostQuitMessage, RegisterClassW, SendMessageW, SetWindowLongPtrW,
+        LoadIconW, MoveWindow, PostQuitMessage, RegisterClassW, SendMessageW, SetWindowLongPtrW,
         SetWindowTextW, ShowWindow, TranslateMessage, BM_GETCHECK, BM_SETCHECK, BN_CLICKED,
         BS_AUTOCHECKBOX, BS_PUSHBUTTON, CBN_SELCHANGE, CBS_DROPDOWNLIST, CB_ADDSTRING,
         CB_GETCURSEL, CB_SETCURSEL, CREATESTRUCTW, CW_USEDEFAULT, EN_CHANGE, ES_AUTOHSCROLL,
@@ -424,7 +429,8 @@ mod win {
                 cbClsExtra: 0,
                 cbWndExtra: 0,
                 hInstance: hinstance,
-                hIcon: std::ptr::null_mut(),
+                // Resource id 1, embedded by `build.rs`.
+                hIcon: LoadIconW(hinstance, APP_ICON_ID),
                 hCursor: LoadCursorW(std::ptr::null_mut(), IDC_ARROW),
                 hbrBackground: brush_bg,
                 lpszMenuName: std::ptr::null(),

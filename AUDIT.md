@@ -1,9 +1,10 @@
 # RustPacker — Repository Audit
 
-**Date:** 2026-11-19
-**Branch audited:** `arena/6b18f778-rustpacker` (from `main` @ `0fd1098`)
+**Date:** 2026-11-19 (M9 and M18 closed later the same day)
+**Branch audited:** `arena/6b18f778-rustpacker` (from `main` @ `0fd1098`);
+M9/M18 work is on `arena/8ed6706f-rustpacker`
 **Scope:** Full workspace — `rustpacker-core`, `rustpacker-cli`, `rustpacker-stub`, `rustpacker-gui`, `examples/demo`, CI, docs, dependencies.
-**Method:** Static code review of all 6,343 lines of Rust + manifests + CI. No Rust toolchain exists in the sandbox, so the audit itself was static; **the fixes in this branch were then compiled, linted and tested in CI** (`.github/workflows/ci.yml`: `ubuntu-latest` fmt → clippy → test, and `windows-latest` clippy for `x86_64-pc-windows-msvc` → test → release `crt-static` build → CLI smoke test). Line numbers below refer to the **pre-fix** tree.
+**Method:** Static code review of all 6,343 lines of Rust + manifests + CI. No Rust toolchain exists in the sandbox, so the audit itself was static; **the fixes in this branch were then compiled, linted and tested in CI** (`.github/workflows/ci.yml`: `ubuntu-latest` fmt → clippy → test, and `windows-latest` clippy for `x86_64-pc-windows-msvc` → test → release `crt-static` build → CLI smoke test → PE resource verification). Line numbers below refer to the **pre-fix** tree.
 
 **Remediation status.** Every finding carries a status line: `FIXED (verified in CI)` means the real pipeline exercised it on this branch; `FIXED (code only)` means it compiles, lints and passes the test suite but its Windows-specific behaviour has not been run; `PARTIAL`/`OPEN` means what it says. CI still never *runs* the GUI or the wizard, so all Windows runtime behaviour (wizard pages, registry writes, shortcuts, install/uninstall round-trip) remains verified by inspection only.
 
@@ -218,8 +219,16 @@ Per-machine scope writes to `%ProgramFiles%` and `HKLM` with no admin check, no 
 
 ### M9. Install runs synchronously on the UI thread
 
-**Status: OPEN.** The install still runs inline in the message handler; the window is unresponsive while extracting.
-`show_page(Installing)` calls `run_install_on_page` → `perform_install` inline in the message handler. The window freezes for the whole extraction (no painting, no Cancel, close button unresponsive until done; queued timer messages burst afterwards). *Fix:* run the install on a worker thread and post progress/completion messages, or at minimum pump messages during extraction.
+**Status: FIXED (compiled and tested in CI on `windows-msvc`; runtime behaviour unverified).**
+`show_page(Installing)` now spawns `rustpacker-install` and returns to the message loop immediately, so the window keeps painting and Cancel stays live throughout.
+
+- **Threading.** `InstallJob` owns everything the worker needs (`ProjectConfig`, the install dir, an `Arc<Payload>`, and a `WindowHandle` wrapper). The worker never touches a window: it publishes the status text through a `Mutex` and `PostMessageW`s `WM_INSTALL_PROGRESS` / `WM_INSTALL_DONE`. `HWND` is not `Send`, so `WindowHandle` records in one place that the only cross-thread call is `PostMessageW`, which is documented as thread-safe; the window outlives the worker because the UI thread refuses to destroy it until `WM_INSTALL_DONE` arrives. If the thread cannot be spawned the install runs inline — a frozen window beats an installer that silently does nothing.
+- **Cooperative cancel.** `CANCEL` is an `AtomicBool`; `check_canceled()` is called at each step boundary (folder creation, uninstaller, ARP, registry, associations, journal) and once per payload entry. Cancellation is only ever observed *before* a step or entry starts, never mid-write, so the journal always describes every completed change and `rollback_journal` stays exact. Cancel rewrites the message to "...was cancelled" and states that every change was rolled back.
+- **Progress.** Extraction now reports bytes through `extract_payload_with_progress`, mapped onto the 20–65% band, with `Extracting {path}...` beside it; the remaining steps report 65/80/86/89/92/100.
+- **Cancel button semantics.** While installing, Cancel only sets the flag (window stays up, button disables, status reads "Cancelling..."). After a successful install it asks Yes/No whether to keep the app and offers to uninstall it. Next/Back are gated on `install_done`/`install_failed` and disabled while `installing`.
+- **Test.** `extraction_reports_progress_and_can_be_cancelled` asserts one report per entry, a monotonic byte total that never exceeds the total, and that a cancel at the second entry touches nothing after it.
+
+**Still unverified:** that the window genuinely repaints, that Cancel is clickable, and that a real Ctrl-Close mid-install rolls back cleanly. CI compiles and lints this code and runs the core test, but it never opens a window. Only a Windows 11 host closes this gap.
 
 ### M10. License page shows the file *path*, not the license
 
@@ -263,8 +272,17 @@ The `FileAssociation` arm deletes `HKCU\Software\Classes\<ext>` and `\<prog_id>`
 
 ### M18. Missing Windows manifest, version info, and icon
 
-**Status: OPEN.** No `build.rs`, no manifest/version resource, no icon. DPI awareness is still set programmatically.
-No `.manifest`, no `VS_VERSION_INFO`, no icon resource for stub or GUI (`hIcon` null, `LoadIcon` never called). Consequences: no `supportedOS`/`longPathAware`/`activeCodePage` declarations, no file/product version in Explorer, default icon in Explorer/ARP/taskbar. DPI awareness is set programmatically (good), but a manifest is still the correct place for compatibility declarations. *Fix:* add a build script (`build.rs` + `embed-manifest`-style or `windows-sys` resource) with manifest + version info + icon for both binaries.
+**Status: FIXED (resources verified in CI on a real Windows binary; appearance unverified).**
+Both binaries now embed a manifest, `VS_VERSION_INFO` and an icon.
+
+`resources/win_resources.rs` is a dependency-free `.res` writer shared by the two `build.rs` files (pulled in with `#[path]`, so there is one implementation and no extra crate). It hand-writes the container rather than requiring `rc.exe`/`windres` on PATH, and hands the result to the linker with `cargo:rustc-link-arg`. The format was the hard part — the file is a flat sequence of records, **not** the PE image's resource directory, and it needs a 32-byte prologue; getting those wrong produced `CVT1107`/`LNK1136`. `tools/inspect_resources.py` decodes either form so CI can assert on it.
+
+- **Manifest.** `asInvoker` (elevation happens only when a project asks for a per-machine install), Per-Monitor-V2 DPI, `longPathAware`, `activeCodePage=UTF-8`, and `supportedOS` for Windows 10/11 and 8.1. A distinct `assemblyIdentity` per binary.
+- **Version info.** CompanyName, FileDescription, FileVersion/ProductVersion, InternalName, OriginalFilename, LegalCopyright, ProductName — what Explorer's Properties → Details and Apps & Features read.
+- **Icon.** A 32×32 32bpp `RT_ICON` as a bare DIB (not an `.ico` container — the loader takes the resource bytes directly) plus an `RT_GROUP_ICON` pointing at it. The stub draws a `>_` prompt, the GUI a window. Both binaries pass `hIcon`/`hIconSm` from `LoadIconW(hinstance, APP_ICON_ID)`, so the title bar, taskbar and Alt-Tab all use it.
+- **CI proof.** `cargo build --release --target x86_64-pc-windows-msvc` now links, and a `Verify embedded resources` step parses the PE resource directory of both binaries, failing if any of the four resources is missing. The CI log shows `RT_ICON / 1 / 1033`, `RT_GROUP_ICON / 1 / 1033`, `RT_VERSION / 1 / 1033` and `RT_MANIFEST / 1 / 1033` in each.
+
+**Still unverified:** how it actually *looks* — whether the icon reads well at 32×32, whether Explorer caches the old blank icon, and whether the version strings render as intended in Properties. That needs a human on Windows.
 
 ---
 
@@ -283,7 +301,7 @@ No `.manifest`, no `VS_VERSION_INFO`, no icon resource for stub or GUI (`hIcon` 
 | L9 | CI: no `cargo clippy`, no `cargo fmt --check`, no Linux/macOS `cargo check` (despite "host builds pass" claims), no `--locked`, no caching, unpinned `stable` toolchain, no artifact upload, no `cargo audit`/`cargo deny`. | `.github/workflows/ci.yml` | PARTIAL — Linux fmt/clippy/test + Windows clippy/test/release/smoke added; no `--locked`, cache, pinned toolchain or audit |
 | L10 | Dependencies are few and current-ish (`serde 1.0.229`, `sha2 0.10.9`, `windows-sys 0.61.2`), but `toml 0.8.23` and `zstd-sys 1.5.7` should be tracked for advisories; no `deny.toml`/Dependabot. **No audit was run in this sandbox** (no toolchain) — run `cargo audit` + `cargo deny check` in CI. | `Cargo.lock` | OPEN — not run; needs CI `cargo audit` |
 | L11 | Release profile (`panic=abort`, `strip`, `lto`, `opt-z`) minimises size but turns any panic into an abort (exit 134, undocumented) and strips symbols needed for field diagnostics. Consider `panic=unwind` for debug builds or at least document the behaviour. | `Cargo.toml` | OPEN |
-| L12 | Test temp dirs use `std::process::id()` (+ a counter in CLI tests, but **no counter in core tests**) — parallel test binaries sharing a PID namespace could collide; core tests also don't clean up on panic. No tests for: Windows sanitise cases, bombs/lying footers, truncation boundaries, journal traversal, schema gaps, `parse_args` edges, `safe_file_name` edges. | `payload.rs` tests, `journal.rs` tests, `cli.rs` tests | PARTIAL — 53 tests now; still no Windows-API tests |
+| L12 | Test temp dirs use `std::process::id()` (+ a counter in CLI tests, but **no counter in core tests**) — parallel test binaries sharing a PID namespace could collide; core tests also don't clean up on panic. No tests for: Windows sanitise cases, bombs/lying footers, truncation boundaries, journal traversal, schema gaps, `parse_args` edges, `safe_file_name` edges. | `payload.rs` tests, `journal.rs` tests, `cli.rs` tests | PARTIAL — 61 tests now; still no Windows-API tests |
 | L13 | `examples/demo/payload/DemoApp.exe` is a 20-byte text placeholder (`MZ-demo-placeholder`), not a PE. Packing the demo with a real stub yields a Setup that installs a text file as the "exe". Docs should say so explicitly. | `examples/demo/` | OPEN |
 | L14 | Typewriter reveals by `char`, splitting grapheme clusters/emoji ZWJ sequences; `reset()` cannot change the interval. Cosmetic only. | `typewriter.rs` | OPEN |
 | L15 | `InstallJournal::save` temp name via `with_extension("json.tmp")` turns `install.journal.json` into `install.journal.tmp` — works, but surprising; two concurrent saves would race. | `journal.rs: save` | FIXED — fsync + temp cleanup + schema-version check (`.json.tmp` naming remains) |
@@ -300,7 +318,7 @@ Schema, journal, and typewriter are clean, well-documented, and well-tested. The
 Exit-code discipline, JSON/human duality, and the `init → validate → pack → verify/list/extract` loop are all well done and well tested (including the "resolve source relative to project file, not cwd" case). Weak spots: global `--json` stripping (M12), missing pack-time checks (M4), double-read for portable (M5), partial outputs (L4), and the duplicated `collect_files` (L2). The hand-rolled JSON escaper is correct (handles `"`, `\`, control chars) but `serde_json` is already a dependency via core — prefer it.
 
 ### `rustpacker-stub` — largest risk surface; unverified on Windows
-The wizard structure (pages, typewriter timer, finish-page model rendering) is thoughtful and the re-entrancy handling is careful. But the install/uninstall core has H1/H3/H4/H5/H8/H10, the UI thread blocks during install (M9), keyboard navigation is broken (M8), and none of it can be tested in this sandbox or (per README) on a real host yet. **This crate needs a Windows 11 test pass before anything else ships.** The COM shortcut code and registry helpers are correct as far as static review can tell.
+The wizard structure (pages, typewriter timer, finish-page model rendering) is thoughtful and the re-entrancy handling is careful. H1/H3/H4/H5/H8/H10 are fixed in code, the install now runs on a worker thread with cooperative cancel (M9) and keyboard navigation works (M8), and both binaries carry a manifest, version info and an icon (M18). But none of the Windows runtime behaviour can be tested in this sandbox or (per README) on a real host yet. **This crate needs a Windows 11 test pass before anything else ships.** The COM shortcut code and registry helpers are correct as far as static review can tell.
 
 ### `rustpacker-gui` — good preview architecture, smaller bugs
 The live-preview-via-`FinishScreenModel` design (single authority for checkbox visibility) is nice. Issues are mostly M14/M13/H9-scale plus L6 polish. The GUI edits only a subset of the schema (by design — unedited fields round-trip untouched, which is correct), but users can't edit description/default-dir/license/admin/build/typewriter/theme/shortcuts/registry from the GUI at all. Either expand the GUI or clearly label it "subset editor — edit TOML for advanced fields".
@@ -342,7 +360,7 @@ README is accurate and unusually honest (verified vs. unverified, unapplied feat
 
 ### Status of this roadmap
 
-P0 items 1–9 are implemented in this branch (H1–H10), and the CI half of item 10 is in place (fmt, clippy, tests, Windows release + smoke test). The **human** half of item 10 — running the wizard and GUI on a real Windows 11 host — is still outstanding, and it is the one thing no amount of CI here can substitute for. P1 is where most of the remaining work sits (M5 streaming, M7 cancel confirmation + logging, M9 worker thread, M11 folder Browse, M18 manifest/version/icon); the L-items are mostly untouched.
+P0 items 1–9 are implemented in this branch (H1–H10), and the CI half of item 10 is in place (fmt, clippy, tests, Windows release + smoke test). The **human** half of item 10 — running the wizard and GUI on a real Windows 11 host — is still outstanding, and it is the one thing no amount of CI here can substitute for. P1 is nearly complete too: M5 (streaming), M7 (cancel confirmation + logging), M9 (worker-thread install) and M18 (manifest/version/icon) are all done and CI-verified. M11's folder Browse and the L-items remain, as does the human half of item 10.
 
 ### P0 — before any end-user release
 1. **H1** Confine uninstall deletions to `install_dir`; validate journal on load.
@@ -357,7 +375,7 @@ P0 items 1–9 are implemented in this branch (H1–H10), and the CI half of ite
 10. **Windows verification:** run stub + GUI on a real Windows 11 host (wizard, typewriter, shortcut, Run entry, ARP, install→uninstall round-trip, per-machine with elevation). Record results in README.
 
 ### P1 — next slice
-M1 (deny unknown fields), M2 (full validation), M4 (pack-time checks), M5 (streaming / single decode), M6 (elevation), M7 (confirmations + log), M8 (keyboard nav), M9 (worker-thread install), M10/M11 (real license page, dir validation + Browse), M13/M14 (shared helpers, CLI/GUI parity), M15–M18 (journal durability, association restore, tray-arg consistency, manifest/version/icon).
+M1 (deny unknown fields), M2 (full validation), M4 (pack-time checks), M5 (streaming / single decode), M6 (elevation), M7 (confirmations + log), M8 (keyboard nav), M9 (worker-thread install), M10/M11 (real license page, dir validation + Browse), M13/M14 (shared helpers, CLI/GUI parity), M15–M18 (journal durability, association restore, tray-arg consistency, manifest/version/icon). Of these, M9 and M18 are now implemented and CI-verified; M11's Browse button is the main remaining P1 gap.
 
 ### P2 — polish
 L1–L17, CI hardening (clippy/fmt/Linux/`--locked`/cache/artifacts/audit/Dependabot), `CHANGELOG`/`SECURITY.md`/`docs/payload-format.md`, `.gitignore` expansion, test-gap coverage (L12), demo placeholder labelling.

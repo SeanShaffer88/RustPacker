@@ -45,6 +45,30 @@ jobs:
         run: cargo build --release --target x86_64-pc-windows-msvc --workspace
       - name: Show binaries
         run: dir target\x86_64-pc-windows-msvc\release\*.exe
+      # The `.res` files `build.rs` writes are only real if CVTRES accepted
+      # them and the linker kept them. This parses the PE resource directory
+      # of the built binaries and fails if a resource is missing.
+      - name: Verify embedded resources
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Enumerate with `find`: bash globbing of nested build directories is
+          # unreliable under Git for Windows, and this must not silently pass
+          # because it matched nothing.
+          mapfile -t res_files < <(find target/x86_64-pc-windows-msvc/release/build -name '*.res' -path '*/out/*')
+          if [ ${#res_files[@]} -eq 0 ]; then
+            echo "::error::build.rs produced no .res file"
+            exit 1
+          fi
+          for f in "${res_files[@]}"; do
+            python tools/inspect_resources.py --res "$f"
+          done
+          # And confirm the linker kept them: parse each binary's resource
+          # directory rather than trusting the .res on its own.
+          for exe in rustpacker-stub rustpacker-gui; do
+            python tools/inspect_resources.py "target/x86_64-pc-windows-msvc/release/$exe.exe"
+          done
+
       - name: Smoke-test the CLI binary
         run: |
           target\x86_64-pc-windows-msvc\release\rustpacker-cli.exe init --out %TEMP%\rustpacker-ci\rustpacker.toml --force
