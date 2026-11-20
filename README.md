@@ -62,7 +62,7 @@ binaries), and an end-to-end pack → verify → extract run using the real
 Windows stub binary, with `SHA256SUMS.txt` checked by an external tool.
 
 Verified in CI (`.github/workflows/ci.yml`): `cargo fmt --check`,
-`cargo clippy -D warnings`, the full test suite and an MSRV (1.78)
+`cargo clippy -D warnings`, the full test suite and an MSRV (1.85)
 build on Linux; on
 `windows-latest`, clippy for `x86_64-pc-windows-msvc` (all targets), the
 test suite, the release `crt-static` build of all four binaries, a smoke

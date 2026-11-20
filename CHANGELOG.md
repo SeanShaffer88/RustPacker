@@ -65,9 +65,10 @@ code.
 ### Fixed
 
 - **The MSRV claim was unbuildable.** The workspace claimed Rust 1.70,
-  but `Cargo.lock` is version 4, which cargo older than 1.78 cannot
-  parse. The MSRV is now honestly 1.78, and the new `msrv` CI job
-  proves the workspace builds with exactly that toolchain.
+  but the dependency tree (indexmap, via serde_json/toml) uses edition
+  2024, which cargo older than 1.85 cannot parse. The MSRV is now
+  honestly 1.85, and the new `msrv` CI job proves the workspace builds
+  with exactly that toolchain.
 - **Finish-page edge cases (AUDIT L17).** A whitespace-only
   `startup_tray_arg` now falls back to `tray_arg` instead of silently
   dropping the tray argument, and quote-leading argument fragments are
