@@ -372,7 +372,7 @@ P0 items 1–9 are implemented in this branch (H1–H10), and the CI half of ite
 7. **H7** Error (don't truncate) on oversize paths/files/counts in archive + ZIP writers.
 8. **H8** Warn/fail-fast on ignored settings; decide `DualMode` semantics; implement or remove unapplied schema fields.
 9. **H9/H10** Sanitise version in GUI; validate `main_exe` as bare filename + presence in payload.
-10. **Windows verification:** run stub + GUI on a real Windows 11 host (wizard, typewriter, shortcut, Run entry, ARP, install→uninstall round-trip, per-machine with elevation). Record results in README.
+10. **Windows verification:** run stub + GUI on a real Windows 11 host (wizard, typewriter, shortcut, Run entry, ARP, install→uninstall round-trip, per-machine with elevation). Record results in README. The step-by-step pass is `docs/windows-verification.md`.
 
 ### P1 — next slice
 M1 (deny unknown fields), M2 (full validation), M4 (pack-time checks), M5 (streaming / single decode), M6 (elevation), M7 (confirmations + log), M8 (keyboard nav), M9 (worker-thread install), M10/M11 (real license page, dir validation + Browse), M13/M14 (shared helpers, CLI/GUI parity), M15–M18 (journal durability, association restore, tray-arg consistency, manifest/version/icon). All of these are now implemented and CI-verified; the runtime behaviour of the Windows-only surfaces (wizard pages, Browse dialog, log file on a real install) still awaits the Windows 11 verification in P0 item 10.
