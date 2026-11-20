@@ -1273,7 +1273,7 @@ mod tests {
 
     fn stub() -> Vec<u8> {
         let mut v = b"MZ".to_vec();
-        v.extend(std::iter::repeat(0u8).take(512));
+        v.extend(std::iter::repeat_n(0u8, 512));
         v
     }
 
