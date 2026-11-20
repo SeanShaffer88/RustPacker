@@ -581,7 +581,18 @@ mod imp {
                         ));
                         continue;
                     }
-                    let backup = base.join(backup_name);
+                    // `backup_name` comes from the journal file, so it is
+                    // validated before it is joined to the install folder:
+                    // a crafted name must not reach outside it.
+                    let backup = match journal.backup_path(backup_name) {
+                        Some(p) => p,
+                        None => {
+                            failures.push(format!(
+                                "refused a malformed backup name for {path}: {backup_name}"
+                            ));
+                            continue;
+                        }
+                    };
                     if backup.is_file() {
                         let _ = std::fs::remove_file(path);
                         if let Err(e) = std::fs::rename(&backup, path) {

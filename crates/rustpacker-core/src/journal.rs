@@ -148,6 +148,19 @@ impl InstallJournal {
         Ok(())
     }
 
+    /// On-disk location of an `OverwriteFile` backup, or `None` when the
+    /// recorded `backup_name` is not a bare file name.
+    ///
+    /// A tampered journal must not be able to point a restore or delete
+    /// at `..\..\Windows\System32` or an absolute path, so the name is
+    /// validated with the same rules as `app.main_exe`.
+    pub fn backup_path(&self, backup_name: &str) -> Option<std::path::PathBuf> {
+        if !crate::schema::is_bare_filename(backup_name) {
+            return None;
+        }
+        Some(std::path::Path::new(&self.install_dir).join(backup_name))
+    }
+
     /// True when `path` is the install directory itself or strictly
     /// inside it (lexical, case-insensitive, `/`/`\\` agnostic).
     /// The uninstaller must refuse to act on any journal path for
@@ -244,6 +257,27 @@ mod tests {
         let text = j.to_json().expect("serialise");
         let back = InstallJournal::from_json(&text).expect("parse");
         assert_eq!(back, j);
+    }
+
+    #[test]
+    fn backup_names_must_be_bare_filenames() {
+        let j = sample();
+        let ok = j
+            .backup_path("install.journal.json.abc123.bak")
+            .expect("a plain name resolves inside the install dir");
+        assert!(ok.starts_with(&j.install_dir));
+        for bad in [
+            r"..\..\Windows\System32\evil.dll",
+            r"C:\Windows\evil.dll",
+            r"sub\evil.dll",
+            "",
+            ".",
+        ] {
+            assert!(
+                j.backup_path(bad).is_none(),
+                "backup name {bad:?} must be refused"
+            );
+        }
     }
 
     #[test]
