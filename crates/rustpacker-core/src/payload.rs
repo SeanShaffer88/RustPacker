@@ -726,6 +726,12 @@ impl<R: Read> ArchiveReader<R> {
         Ok(data)
     }
 
+    /// Archive byte length the footer declared (the sum of every header and
+    /// every entry, including the entry count prefix).
+    fn expected_len(&self) -> u64 {
+        self.expected_len
+    }
+
     /// Prove the archive was consumed exactly as the footer declared. A
     /// mismatch means the footer lied (or the stream is corrupt).
     fn finish(self) -> Result<(), String> {
@@ -812,12 +818,35 @@ pub fn verify_payload(exe: &[u8]) -> Result<PayloadManifest, String> {
 /// Files stream straight from the decompressor to disk, so extraction
 /// needs one 64 KiB chunk rather than the whole payload.
 pub fn extract_payload(exe: &[u8], dest_dir: &Path) -> Result<Vec<String>, String> {
+    extract_payload_with_progress(exe, dest_dir, &mut |_done, _total, _path| Ok(()))
+}
+
+/// Progress sink for [`extract_payload_with_progress`].
+///
+/// `done` is the byte total of the entries finished before this one and
+/// `total` is the archive's declared byte total, so a caller can drive a
+/// progress bar without knowing the payload layout. Returning an error
+/// aborts the extraction: the caller's error becomes the failure reason,
+/// and the partial output is left for the caller to roll back (the stub
+/// journals every target before extracting for exactly this reason).
+pub type ExtractProgress<'a> = dyn FnMut(u64, u64, &str) -> Result<(), String> + 'a;
+
+/// [`extract_payload`] with per-entry progress and cooperative cancellation.
+pub fn extract_payload_with_progress(
+    exe: &[u8],
+    dest_dir: &Path,
+    progress: &mut ExtractProgress<'_>,
+) -> Result<Vec<String>, String> {
     let mut reader = open_archive(exe)?;
     std::fs::create_dir_all(dest_dir)
         .map_err(|e| format!("could not create {}: {e}", dest_dir.display()))?;
     let dest_canonical = std::fs::canonicalize(dest_dir)
         .map_err(|e| format!("could not resolve {}: {e}", dest_dir.display()))?;
     let count = reader.read_count()?;
+    // The archive's declared total size, so progress is meaningful from the
+    // first entry instead of guessing.
+    let total_bytes = reader.expected_len();
+    let mut done_bytes: u64 = 0;
     let mut extracted = Vec::new();
     for _ in 0..count {
         let entry = reader.next_entry()?;
@@ -825,6 +854,7 @@ pub fn extract_payload(exe: &[u8], dest_dir: &Path) -> Result<Vec<String>, Strin
             reader.skip_current()?;
             continue;
         }
+        progress(done_bytes, total_bytes, &entry.path)?;
         let rel = sanitise_rel_path(&entry.path)?;
         let target = dest_dir.join(&rel);
         if let Some(parent) = target.parent() {
@@ -854,6 +884,7 @@ pub fn extract_payload(exe: &[u8], dest_dir: &Path) -> Result<Vec<String>, Strin
             file.write_all(chunk)
                 .map_err(|e| format!("could not write {}: {e}", target.display()))
         })?;
+        done_bytes = done_bytes.saturating_add(entry.size);
         extracted.push(entry.path);
     }
     reader.finish()?;
@@ -1544,6 +1575,48 @@ mod tests {
         let real = u64::from_le_bytes(lying[n - 8..n].try_into().expect("footer"));
         lying[n - 8..n].copy_from_slice(&(real - 1).to_le_bytes());
         assert!(read_manifest(&lying).is_err());
+    }
+
+    #[test]
+    fn extraction_reports_progress_and_can_be_cancelled() {
+        let files: Vec<(String, Vec<u8>)> = (0..4)
+            .map(|i| (format!("f{i}.bin"), vec![i as u8; 1000]))
+            .collect();
+        let exe = pack_files(&stub(), files, "{}").expect("pack");
+
+        // Progress: one call per payload entry, plus the monotonic byte
+        // total that a progress bar needs.
+        let dir = std::env::temp_dir().join(format!("rustpacker-prog-{}", std::process::id()));
+        let mut seen: Vec<(u64, u64)> = Vec::new();
+        extract_payload_with_progress(&exe, &dir, &mut |done, total, _path| {
+            assert!(done <= total, "progress must not exceed the total");
+            seen.push((done, total));
+            Ok(())
+        })
+        .expect("extract with progress");
+        assert_eq!(seen.len(), 4, "one report per file");
+        assert!(seen.iter().all(|(_, total)| *total > 0));
+        // Bytes advanced between reports.
+        assert!(seen.windows(2).all(|w| w[0].0 <= w[1].0));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Cancelling aborts with the caller's reason and leaves the
+        // partial output for the caller to roll back.
+        let dir2 =
+            std::env::temp_dir().join(format!("rustpacker-cancel-{}", std::process::id()));
+        let mut calls = 0;
+        let err = extract_payload_with_progress(&exe, &dir2, &mut |_, _, _| {
+            calls += 1;
+            if calls == 2 {
+                Err("Setup was cancelled".to_string())
+            } else {
+                Ok(())
+            }
+        })
+        .expect_err("cancel must abort");
+        assert!(err.contains("cancelled"), "{err}");
+        assert_eq!(calls, 2, "no further entries are touched after a cancel");
+        let _ = std::fs::remove_dir_all(&dir2);
     }
 
     #[test]

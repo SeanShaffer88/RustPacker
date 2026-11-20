@@ -1,0 +1,55 @@
+name: Debug CI
+
+on:
+  push:
+    branches: [arena/8ed6706f-rustpacker]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: All checks with output
+        shell: bash
+        run: |
+          set +e
+          {
+            echo '### clippy'
+            echo '```'
+            cargo clippy --workspace --all-targets -- -D warnings 2>&1 \
+              | grep -vE '^\s+(Compiling|Checking|Finished|Downloading|Downloaded|Updating|Blocking|Locking|Adding)' | head -n 250
+            echo '```'
+            echo '### test'
+            echo '```'
+            cargo test --workspace 2>&1 | grep -vE '^\s+(Compiling|Checking|Finished|Downloading|Downloaded|Updating)' | tail -n 150
+            echo '```'
+            echo '### fmt'
+            echo '```'
+            cargo fmt --all -- --check 2>&1 | head -n 60
+            echo '```'
+          } > diag.md
+          echo "===== DIAG ====="
+          cat diag.md
+
+      - name: Windows cross-check (stub/gui compile for msvc)
+        shell: bash
+        run: |
+          set +e
+          rustup target add x86_64-pc-windows-msvc >/dev/null 2>&1
+          {
+            echo '### windows clippy'
+            echo '```'
+            cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings 2>&1 \
+              | grep -vE '^\s+(Compiling|Checking|Finished|Downloading|Downloaded|Updating)' | head -n 250
+            echo '```'
+          } | tee win.md
+          echo "===== WINDOWS ====="
+          cat win.md
