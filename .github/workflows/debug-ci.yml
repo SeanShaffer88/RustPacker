@@ -18,23 +18,22 @@ jobs:
           targets: x86_64-pc-windows-msvc
           components: rustfmt, clippy
       - name: Collect diagnostics
-        shell: pwsh
+        shell: bash
         run: |
-          $env:RUSTFLAGS = "-D warnings"
-          $report = @()
-          $report += '## fmt'
-          $report += (cargo fmt --all -- --check 2>&1 | Select-Object -First 120)
-          $report += '## clippy windows'
-          $report += (cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc 2>&1 | Select-String -Pattern 'error|warning' | Select-Object -First 120)
-          $report += '## check windows'
-          $report += (cargo check --workspace --all-targets --target x86_64-pc-windows-msvc 2>&1 | Select-String -Pattern 'error|warning' | Select-Object -First 120)
-          $report -join "`n" | Out-File -Encoding utf8 report.txt
+          export RUSTFLAGS="-D warnings"
+          {
+            echo '## fmt'
+            cargo fmt --all -- --check 2>&1 | head -150
+            echo '## clippy errors'
+            cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc 2>&1 | grep -E 'error|warning:' -A 8 | head -300
+            echo '## clippy done'
+          } > report.txt 2>&1
+          true
       - name: Post report
-        shell: pwsh
+        if: always()
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $body = Get-Content report.txt -Raw
-          if ($body.Length -gt 60000) { $body = $body.Substring(0, 60000) }
-          $body | Out-File -Encoding utf8 body.txt
+          head -c 60000 report.txt > body.txt 2>/dev/null || echo '(no report)' > body.txt
           gh pr comment 16 --body-file body.txt
