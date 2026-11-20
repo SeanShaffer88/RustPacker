@@ -1264,7 +1264,7 @@ mod win {
         app.c.lbl_center_hint = mk_label(app, parent, "", 0);
 
         build_pages(app, parent);
-        create_menu_bar(app, parent);
+        create_menu_bar(parent);
 
         // Right panel: page selector + live preview.
         app.c.lbl_page = mk_label(app, parent, "Wizard page:", 0);
