@@ -399,7 +399,7 @@ fn build_payload(
         counting
             .write_all(&(sorted.len() as u32).to_le_bytes())
             .map_err(|e| format!("could not write the payload archive: {e}"))?;
-        for (header, source) in &sorted {
+        for (header, source) in sorted {
             let path_bytes = header.path.as_bytes();
             let mut prefix = Vec::with_capacity(2 + path_bytes.len() + 8 + 32);
             prefix.extend_from_slice(&(path_bytes.len() as u16).to_le_bytes());
