@@ -42,8 +42,8 @@ fn main() {
 mod imp {
     use rustpacker_core::{
         extract_payload, find_payload, read_manifest, sha256_hex, InstallJournal, InstallScope,
-        JournalAction, Prerequisite, ProjectConfig, Typewriter, JOURNAL_FILE_NAME,
-        UNINSTALLER_FILE_NAME,
+        JournalAction, PayloadManifest, Prerequisite, ProjectConfig, Typewriter,
+        JOURNAL_FILE_NAME, UNINSTALLER_FILE_NAME,
     };
     use std::cell::RefCell;
     use std::collections::HashSet;
@@ -165,6 +165,22 @@ mod imp {
         cfg
     }
 
+    /// Read just the embedded project config, skipping the per-file hash
+    /// verification. Used by the elevation probe before the wizard starts,
+    /// where the full payload is loaded afterwards anyway.
+    fn peek_config() -> Result<ProjectConfig, String> {
+        let exe =
+            std::env::current_exe().map_err(|e| format!("could not locate this installer: {e}"))?;
+        let bytes =
+            std::fs::read(&exe).map_err(|e| format!("could not read this installer: {e}"))?;
+        let manifest = read_manifest(&bytes)
+            .map_err(|e| format!("this installer's payload is damaged and cannot be read:\n\n{e}"))?;
+        let json = manifest.config_json.ok_or_else(|| {
+            "this installer's payload has no project configuration".to_string()
+        })?;
+        ProjectConfig::from_json(&json)
+    }
+
     /// Read the embedded project config from our own exe.
     ///
     /// Demo mode is entered **only** when this binary genuinely carries
@@ -172,19 +188,37 @@ mod imp {
     /// config is missing/invalid, or whose config fails validation is a
     /// hard error: silently installing a placeholder app instead would
     /// hide tampering and leave a bogus Apps & Features entry behind.
-    fn load_config() -> Result<(ProjectConfig, bool), String> {
+    /// What the wizard needs from its own payload.
+    ///
+    /// The exe is read **once** here and the bytes are carried through to
+    /// the install, so the payload is decompressed exactly once per
+    /// process instead of once per API call (`find_payload`,
+    /// `read_manifest`, `extract_payload` each used to re-read and
+    /// re-inflate the whole archive).
+    struct Payload {
+        /// The whole installer image; `extract_payload` streams from it.
+        exe: Vec<u8>,
+        manifest: PayloadManifest,
+    }
+
+    /// Reference-counted payload: the wizard state snapshots it on every
+    /// page change, so it must be cheap to clone. Cloning this bumps a
+    /// refcount instead of copying the installer image.
+    type SharedPayload = std::rc::Rc<Payload>;
+
+    fn load_config() -> Result<(ProjectConfig, bool, Option<SharedPayload>), String> {
         let exe =
             std::env::current_exe().map_err(|e| format!("could not locate this installer: {e}"))?;
         let bytes =
             std::fs::read(&exe).map_err(|e| format!("could not read this installer: {e}"))?;
         if find_payload(&bytes).is_err() {
             // Genuinely not packed: demo mode is intentional here.
-            return Ok((demo_config(), false));
+            return Ok((demo_config(), false, None));
         }
         let manifest = read_manifest(&bytes).map_err(|e| {
             format!("this installer's payload is damaged and cannot be read:\n\n{e}")
         })?;
-        let json = manifest.config_json.ok_or(
+        let json = manifest.config_json.clone().ok_or(
             "this installer's payload has no project configuration, so it cannot be installed.\n\
              Rebuild it with `rustpacker-cli pack`.",
         )?;
@@ -198,7 +232,14 @@ mod imp {
                 errors.join("\n  - ")
             ));
         }
-        Ok((cfg, true))
+        Ok((
+            cfg,
+            true,
+            Some(std::rc::Rc::new(Payload {
+                exe: bytes,
+                manifest,
+            })),
+        ))
     }
 
     fn sanitize_folder(name: &str) -> String {
@@ -909,6 +950,7 @@ mod imp {
     fn perform_install(
         cfg: &ProjectConfig,
         install_dir: &str,
+        payload: Option<&Payload>,
         mut report: impl FnMut(u32, &str),
     ) -> Result<InstallOutcome, String> {
         // Any failure after the first change rolls everything back, so a
@@ -923,7 +965,14 @@ mod imp {
             install_dir,
             effective_scope.label(),
         );
-        match perform_install_inner(cfg, install_dir, effective_scope, &mut journal, &mut report) {
+        match perform_install_inner(
+            cfg,
+            install_dir,
+            effective_scope,
+            payload,
+            &mut journal,
+            &mut report,
+        ) {
             Ok(()) => Ok(InstallOutcome {
                 journal,
                 install_dir: install_dir.to_string(),
@@ -969,6 +1018,7 @@ mod imp {
         cfg: &ProjectConfig,
         install_dir: &str,
         effective_scope: InstallScope,
+        payload: Option<&Payload>,
         journal: &mut InstallJournal,
         report: &mut impl FnMut(u32, &str),
     ) -> Result<(), String> {
@@ -993,17 +1043,17 @@ mod imp {
         }
 
         report(20, "Extracting files...");
-        let exe_bytes =
-            std::fs::read(&own_exe).map_err(|e| format!("could not read this installer: {e}"))?;
         let mut recorded_dirs: HashSet<String> = HashSet::new();
         recorded_dirs.insert(install_dir.to_string());
-        if find_payload(&exe_bytes).is_ok() {
-            // Read the manifest first so folders and overwrite backups are
-            // journaled *before* `extract_payload` writes anything: a
-            // failure part-way through then rolls back every folder the
-            // extractor created, including ones already written.
-            let manifest = read_manifest(&exe_bytes)
-                .map_err(|e| format!("could not read the payload: {e}"))?;
+        // The payload was already read and decoded once by `load_config`;
+        // reuse it here rather than reading and inflating the archive a
+        // second time.
+        if let Some(payload) = payload {
+            let manifest = &payload.manifest;
+            // Journal folders and overwrite backups *before* extraction
+            // writes anything: a failure part-way through then rolls back
+            // every folder the extractor created, including ones already
+            // written.
             for entry in &manifest.files {
                 let full = dest.join(entry.path.replace('/', "\\"));
                 if full.is_file() {
@@ -1042,7 +1092,7 @@ mod imp {
                 }
                 journal.record_file(&full.to_string_lossy());
             }
-            let extracted = extract_payload(&exe_bytes, &dest)?;
+            let extracted = extract_payload(&payload.exe, &dest)?;
             debug_assert_eq!(extracted.len(), manifest.files.len());
             // The app the installer promises must actually be there.
             let main_exe = dest.join(&cfg.app.main_exe);
@@ -1390,6 +1440,9 @@ mod imp {
     struct WizardState {
         cfg: ProjectConfig,
         packed: bool,
+        /// The payload read once at startup (None in demo mode), reused by
+        /// the install instead of re-reading and re-inflating the archive.
+        payload: Option<SharedPayload>,
         pages: Vec<Page>,
         page_index: usize,
         typewriter: Typewriter,
@@ -1608,6 +1661,7 @@ mod imp {
                 s.install_dir.clone(),
                 s.install_done,
                 s.install_error.is_some(),
+                s.payload.clone(),
             )
         }) else {
             return;
@@ -1627,6 +1681,7 @@ mod imp {
             install_dir,
             install_done,
             install_failed,
+            payload,
         ) = snapshot;
 
         with_state(destroy_page_controls);
@@ -1706,7 +1761,7 @@ mod imp {
                     s.status = status;
                 });
                 if !install_done && !install_failed {
-                    run_install_on_page(cfg, install_dir, progress, status);
+                    run_install_on_page(&cfg, &install_dir, payload.as_ref(), progress, status);
                 }
             }
             Page::Finish => build_finish_controls(hwnd, font, &cfg),
@@ -1715,11 +1770,17 @@ mod imp {
         let _ = unsafe { SetFocus(hwnd) };
     }
 
-    fn run_install_on_page(cfg: ProjectConfig, install_dir: String, progress: HWND, status: HWND) {
+    fn run_install_on_page(
+        cfg: &ProjectConfig,
+        install_dir: &str,
+        payload: Option<&SharedPayload>,
+        progress: HWND,
+        status: HWND,
+    ) {
         let _ = unsafe { SendMessageW(progress, PBM_SETRANGE32, 0, 100) };
         let report_status = status;
         let report_progress = progress;
-        let outcome = perform_install(&cfg, &install_dir, |percent, text| {
+        let outcome = perform_install(cfg, install_dir, payload.map(|p| &**p), |percent, text| {
             let _ = unsafe { SendMessageW(report_progress, PBM_SETPOS, percent as WPARAM, 0) };
             set_text(report_status, text);
         });
@@ -2284,8 +2345,8 @@ mod imp {
         // instead of failing at the first HKLM write. A per-user install
         // never asks for (or needs) administrator rights.
         if !is_elevated() {
-            let needs_machine = match load_config() {
-                Ok((cfg, _)) => {
+            let needs_machine = match peek_config() {
+                Ok(cfg) => {
                     cfg.install.require_admin || cfg.install.scope.resolve(true).is_machine_wide()
                 }
                 Err(_) => false,
@@ -2317,7 +2378,7 @@ mod imp {
         let _ =
             unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
 
-        let (cfg, packed) = match load_config() {
+        let (cfg, packed, payload) = match load_config() {
             Ok(v) => v,
             Err(message) => {
                 // A packed installer that cannot read its own payload must
@@ -2399,6 +2460,7 @@ mod imp {
             install_error: None,
             cfg,
             packed,
+            payload,
         };
         STATE.with(|cell| *cell.borrow_mut() = Some(state));
 
