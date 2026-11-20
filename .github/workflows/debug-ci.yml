@@ -1,0 +1,46 @@
+name: Debug CI
+
+on:
+  push:
+    branches: [arena/9c4c73ed-rustpacker]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Diagnostics
+        shell: bash
+        run: |
+          {
+            echo '<!-- rustpacker-diag -->'
+            echo '### fmt'
+            echo '```'
+            cargo fmt --all -- --check 2>&1 | head -n 150
+            echo '```'
+            echo '### clippy (linux)'
+            echo '```'
+            cargo clippy --workspace --all-targets -- -D warnings 2>&1 \
+              | grep -vE '^\s+(Compiling|Checking|Finished|Downloading|Downloaded|Updating|Blocking|Locking|Adding)' | head -n 120
+            echo '```'
+            echo '### test (linux)'
+            echo '```'
+            cargo test --workspace 2>&1 | grep -E "^test result|^error|^failures:|^---- |panicked" | head -n 80
+            echo '```'
+          } > diag.md
+      - name: Post
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          head -c 60000 diag.md > d.md || true
+          gh pr comment 6 --body-file d.md
