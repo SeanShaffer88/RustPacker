@@ -8,6 +8,7 @@
 pub mod journal;
 pub mod payload;
 pub mod schema;
+pub mod scratch;
 pub mod typewriter;
 
 pub use journal::{
@@ -25,6 +26,7 @@ pub use schema::{
     InstallConfig, InstallScope, Prerequisite, ProcessCheck, ProjectConfig, RegistryEntry,
     ShortcutConfig, TerminalTheme, TrayConfig, CURRENT_SCHEMA_VERSION,
 };
+pub use scratch::ScratchDir;
 pub use typewriter::{Typewriter, DEFAULT_INTERVAL_MS};
 
 /// Library version, kept in step with the workspace version.

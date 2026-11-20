@@ -1,3 +1,28 @@
+# Rust build output.
 /target
+
+# Debug symbols and crash dumps.
 *.pdb
+*.dSYM/
+
+# RustPacker writes its own output into the current directory by default
+# (`--out-dir` defaults to `.`), and `pack` names the files after the project:
+#   <App>-v<version>-Setup.exe, <App>-v<version>-Portable.zip, SHA256SUMS.txt
+# Ignoring the shapes rather than the directory keeps a stray build out of
+# commits without hiding unrelated executables a contributor may keep.
+*-Setup.exe
+*-Portable.zip
+SHA256SUMS.txt
+/rustpacker.toml
+
+# Local release staging (`release/payload/` is assembled by release.yml).
 dist/
+/release/payload/
+
+# Editor and OS noise.
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db

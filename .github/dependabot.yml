@@ -1,0 +1,28 @@
+version: 2
+updates:
+  # Rust dependencies. The workspace is deliberately small (serde, sha2,
+  # toml, zstd, windows-sys); a security advisory in any of them matters
+  # because the stub is shipped to end users.
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      # Patch and minor bumps together: they are usually safe and this keeps
+      # the PR list short enough to actually review.
+      rust-patch-minor:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    labels: ["dependencies", "rust"]
+
+  # Keep the Actions used by ci.yml / release.yml current: a pinned action
+  # is supply-chain surface too.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "ci"]

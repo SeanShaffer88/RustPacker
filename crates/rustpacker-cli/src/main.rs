@@ -788,15 +788,16 @@ fn cmd_pack(args: &[String]) -> Result<CmdOk, Fail> {
     let version_stem = safe_file_name(&cfg.app.version);
     let setup_name = format!("{app_stem}-v{version_stem}-Setup.exe");
     let setup_path = join_out(&out_dir, &setup_name);
-    fs::write(&setup_path, &setup_bytes).map_err(|e| {
-        Fail::io(
-            "pack",
-            format!("could not write {}: {e}", setup_path.display()),
-        )
-    })?;
 
+    // ---- build every output in memory, then write them as one unit --------
+    //
+    // L4: writing each file as it is produced meant a failure halfway through
+    // left a Setup.exe with no SHA256SUMS.txt -- an installer that looks
+    // finished and cannot be verified. Both payloads are already built by
+    // this point, so the only remaining failure mode is the filesystem, and
+    // for that a rollback is exact: delete what this run created and restore
+    // what it replaced.
     let mut portable_name: Option<String> = None;
-    let mut portable_path: Option<PathBuf> = None;
     let mut portable_bytes: Vec<u8> = Vec::new();
     if want_portable {
         // The payload walk already produced the manifest; reuse it instead
@@ -804,8 +805,6 @@ fn cmd_pack(args: &[String]) -> Result<CmdOk, Fail> {
         // ZIP writer streams each file from disk, so only 64 KiB per entry
         // is resident.
         let marker = portable_marker(&cfg, entries.len());
-        // Resolve each manifest path back to its file on disk. The paths are
-        // owned by `zip_paths` so the `ZipSource` borrows stay valid.
         let zip_paths: Vec<PathBuf> = entries
             .iter()
             .map(|entry| source_dir.join(entry.path.replace('/', std::path::MAIN_SEPARATOR_STR)))
@@ -819,12 +818,7 @@ fn cmd_pack(args: &[String]) -> Result<CmdOk, Fail> {
             ZipSource::Bytes(marker.as_bytes()),
         ));
         portable_bytes = write_stored_zip_streaming(&refs).map_err(|m| Fail::io("pack", m))?;
-        let name = format!("{app_stem}-v{version_stem}-Portable.zip");
-        let path = join_out(&out_dir, &name);
-        fs::write(&path, &portable_bytes)
-            .map_err(|e| Fail::io("pack", format!("could not write {}: {e}", path.display())))?;
-        portable_name = Some(name);
-        portable_path = Some(path);
+        portable_name = Some(format!("{app_stem}-v{version_stem}-Portable.zip"));
     }
 
     let sums_name = "SHA256SUMS.txt".to_string();
@@ -834,12 +828,17 @@ fn cmd_pack(args: &[String]) -> Result<CmdOk, Fail> {
     }
     let sums_text = sha256sums_txt(&sum_items);
     let sums_path = join_out(&out_dir, &sums_name);
-    fs::write(&sums_path, sums_text.as_bytes()).map_err(|e| {
-        Fail::io(
-            "pack",
-            format!("could not write {}: {e}", sums_path.display()),
-        )
-    })?;
+
+    let portable_path = portable_name.as_ref().map(|n| join_out(&out_dir, n));
+
+    let mut planned: Vec<(&Path, &[u8])> = vec![(&setup_path, &setup_bytes)];
+    if let (Some(path), Some(_)) = (&portable_path, &portable_name) {
+        planned.push((path, &portable_bytes));
+    }
+    // Checksums last: they describe the final bytes of the other two.
+    planned.push((&sums_path, sums_text.as_bytes()));
+
+    write_outputs(&planned).map_err(|m| Fail::io("pack", m))?;
 
     let file_count = entries.len();
     let total_bytes: u64 = entries.iter().map(|e| e.size).sum();
@@ -879,6 +878,67 @@ fn cmd_pack(args: &[String]) -> Result<CmdOk, Fail> {
         human,
         json: Some(json),
     })
+}
+
+/// Write a set of output files as one unit.
+///
+/// Each file is written to `<name>.tmp` first and then renamed into place, so
+/// a reader never observes a half-written artifact. If any write or rename
+/// fails, everything this call created is removed and any replaced file is
+/// restored from its backup — `pack` either produces the complete set or
+/// changes nothing.
+fn write_outputs(files: &[(&Path, &[u8])]) -> Result<(), String> {
+    // Back up anything we are about to overwrite, so a rollback can put the
+    // previous generation back instead of deleting the user's last good build.
+    let mut backups: Vec<(PathBuf, Option<Vec<u8>>)> = Vec::new();
+    let mut written: Vec<PathBuf> = Vec::new();
+
+    let rollback = |backups: &[(PathBuf, Option<Vec<u8>>)], written: &[PathBuf]| {
+        for path in written.iter().rev() {
+            let _ = fs::remove_file(path);
+        }
+        for (path, previous) in backups {
+            match previous {
+                Some(bytes) => {
+                    let _ = fs::write(path, bytes);
+                }
+                None => {
+                    let _ = fs::remove_file(path);
+                }
+            }
+        }
+    };
+
+    for (path, bytes) in files {
+        let previous = match fs::read(path) {
+            Ok(existing) => Some(existing),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => {
+                rollback(&backups, &written);
+                return Err(format!("could not inspect {}: {e}", path.display()));
+            }
+        };
+        backups.push((path.to_path_buf(), previous));
+
+        // `Setup.exe` -> `Setup.exe.tmp` (with_extension would replace .exe).
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(".tmp");
+        let tmp = PathBuf::from(tmp);
+        // Write, then rename: a crash mid-write leaves the .tmp, never a
+        // truncated Setup.exe.
+        if let Err(e) = fs::write(&tmp, bytes) {
+            let _ = fs::remove_file(&tmp);
+            rollback(&backups, &written);
+            return Err(format!("could not write {}: {e}", tmp.display()));
+        }
+        if let Err(e) = fs::rename(&tmp, path) {
+            let _ = fs::remove_file(&tmp);
+            rollback(&backups, &written);
+            return Err(format!("could not finish writing {}: {e}", path.display()));
+        }
+        written.push(path.to_path_buf());
+    }
+    Ok(())
 }
 
 fn portable_marker(cfg: &ProjectConfig, file_count: usize) -> String {
@@ -1111,6 +1171,60 @@ mod tests {
         // The shared sanitiser must strip path separators from a version.
         assert_eq!(safe_file_name("1.0/../evil"), "1.0-..-evil");
         assert_eq!(safe_file_name("CON"), "_CON");
+    }
+
+    #[test]
+    fn write_outputs_writes_everything() {
+        let dir = std::env::temp_dir().join(format!("rustpacker-wo-{}-a", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let a = dir.join("A-Setup.exe");
+        let b = dir.join("SHA256SUMS.txt");
+        write_outputs(&[(&a, b"setup"), (&b, b"sums")]).expect("write");
+        assert_eq!(std::fs::read(&a).expect("read a"), b"setup");
+        assert_eq!(std::fs::read(&b).expect("read b"), b"sums");
+        // No .tmp files are left behind.
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .expect("read dir")
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp files left: {leftovers:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_outputs_replaces_an_earlier_build() {
+        let dir = std::env::temp_dir().join(format!("rustpacker-wo-{}-b", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let a = dir.join("A-Setup.exe");
+        std::fs::write(&a, b"old build").expect("seed");
+        write_outputs(&[(&a, b"new build")]).expect("write");
+        assert_eq!(std::fs::read(&a).expect("read"), b"new build");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_outputs_rolls_back_when_a_later_file_fails() {
+        let dir = std::env::temp_dir().join(format!("rustpacker-wo-{}-c", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let good = dir.join("A-Setup.exe");
+        std::fs::write(&good, b"previous generation").expect("seed");
+        // A directory where a file is expected: the write must fail, and the
+        // earlier file must be restored to the bytes it had before.
+        let blocked = dir.join("SHA256SUMS.txt");
+        std::fs::create_dir_all(&blocked).expect("mkdir blocker");
+        let err = write_outputs(&[(&good, b"new generation"), (&blocked, b"sums")])
+            .expect_err("must fail");
+        assert!(err.contains("SHA256SUMS"), "{err}");
+        assert_eq!(
+            std::fs::read(&good).expect("read"),
+            b"previous generation",
+            "the successful write must be rolled back"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

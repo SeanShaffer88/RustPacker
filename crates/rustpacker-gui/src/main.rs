@@ -1321,6 +1321,14 @@ mod win {
 
     // ---- file dialogs ---------------------------------------------------------------------
 
+    /// Characters the file dialog will accept.
+    ///
+    /// L5: this was 1,024, so a deeply nested project path was silently cut
+    /// short and the dialog returned a truncated path. 32,767 is the maximum
+    /// a Win32 path can be; 8,192 is comfortably beyond any real project and
+    /// still bounds the allocation.
+    const MAX_DIALOG_PATH_CHARS: usize = 8192;
+
     unsafe fn file_dialog(
         owner: HWND,
         save: bool,
@@ -1328,11 +1336,11 @@ mod win {
         def_ext: &str,
         initial_name: &str,
     ) -> Option<PathBuf> {
-        let mut buf = vec![0u16; 1024];
+        let mut buf = vec![0u16; MAX_DIALOG_PATH_CHARS];
         let init: Vec<u16> = initial_name.encode_utf16().collect();
-        if init.len() < buf.len() {
-            buf[..init.len()].copy_from_slice(&init);
-        }
+        // Leave room for the terminating NUL the dialog expects.
+        let copy = init.len().min(buf.len().saturating_sub(1));
+        buf[..copy].copy_from_slice(&init[..copy]);
         let filter_w = wide(filter);
         let defext_w = wide(def_ext);
         let title_w = wide(if save {

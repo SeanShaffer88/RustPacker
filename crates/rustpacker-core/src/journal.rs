@@ -304,13 +304,10 @@ mod tests {
 
     #[test]
     fn save_and_load_via_disk() {
-        let dir =
-            std::env::temp_dir().join(format!("rustpacker-journal-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("mkdir");
+        let dir = crate::scratch::ScratchDir::new("rustpacker-journal-test");
         let path = dir.join(JOURNAL_FILE_NAME);
         sample().save(&path).expect("save");
         let back = InstallJournal::load(&path).expect("load");
         assert_eq!(back.app_id, "MyApp");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

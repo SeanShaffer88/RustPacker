@@ -1,0 +1,7 @@
+# Keep the defaults: `cargo fmt --check` in CI is the authority, and a
+# non-default config would make contributors' local runs disagree with it.
+edition = "2021"
+
+# Reorder imports only when explicitly asked, so a stray `cargo fmt` does not
+# produce a diff unrelated to the change.
+reorder_imports = true

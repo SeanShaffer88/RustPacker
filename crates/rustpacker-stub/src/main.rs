@@ -80,14 +80,30 @@ mod imp {
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-        GetWindowTextW, KillTimer, LoadCursorW, LoadIconW, MessageBoxW, PostMessageW,
-        PostQuitMessage, RegisterClassExW, SendMessageW, SetTimer, SetWindowTextW, ShowWindow,
-        TranslateMessage, BM_GETCHECK, BM_SETCHECK, BN_CLICKED, CS_HREDRAW, CS_VREDRAW,
+        GetWindowTextLengthW, GetWindowTextW, KillTimer, LoadCursorW, LoadIconW, MessageBoxW,
+        PostMessageW, PostQuitMessage, RegisterClassExW, SendMessageW, SetTimer, SetWindowTextW,
+        ShowWindow, TranslateMessage, BM_GETCHECK, BM_SETCHECK, BN_CLICKED, CS_HREDRAW, CS_VREDRAW,
         CW_USEDEFAULT, HMENU, IDC_ARROW, IDYES, MB_DEFBUTTON2, MB_ICONERROR, MB_ICONINFORMATION,
         MB_ICONQUESTION, MB_OK, MB_YESNO, MSG, STN_CLICKED, SW_SHOWNORMAL, WM_COMMAND,
         WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN,
         WM_PARENTNOTIFY, WM_SETFONT, WM_TIMER, WNDCLASSEXW,
     };
+
+    // Font metrics (L5: these were bare numbers in the CreateFontW call).
+    /// Character height for body text, in pixels.
+    const BODY_FONT_HEIGHT: i32 = 16;
+    /// Character height for the page heading.
+    const TITLE_FONT_HEIGHT: i32 = 21;
+    const FONT_WEIGHT_NORMAL: i32 = 400;
+    const FONT_WEIGHT_BOLD: i32 = 700;
+    const DEFAULT_CHARSET: u32 = 1;
+    const OUT_DEFAULT_PRECIS: u32 = 0;
+    const CLIP_DEFAULT_PRECIS: u32 = 0;
+    /// ClearType is what makes the wizard's monospace text look right on LCDs.
+    const CLEARTYPE_QUALITY: u32 = 5;
+    /// `FF_MODERN | FIXED_PITCH | (VARIABLE_PITCH << 4)` — what GDI calls a
+    /// monospace family. Windows resolves it to the requested face.
+    const FIXED_PITCH_FAMILY: u32 = 49;
 
     // Control IDs.
     const ID_TITLE: i32 = 100;
@@ -140,8 +156,33 @@ mod imp {
         let w = wide(text);
         let _ = unsafe { SetWindowTextW(hwnd, pcw(&w)) };
     }
+    /// Longest path the installer will accept from the folder field.
+    ///
+    /// `MAX_PATH` is 260, but a user can legitimately type a longer path and
+    /// Windows 10+ with `longPathAware` (which our manifest sets) allows up to
+    /// 32,767. 4,096 is a generous ceiling that still bounds the buffer.
+    const MAX_PATH_CHARS: usize = 4096;
+
+    /// Read a control's text in full.
+    ///
+    /// L5: this used to read into a fixed 2,048-element buffer, so a longer
+    /// install path was silently cut short and the user would watch the
+    /// installer write to a truncated directory. It now asks for the length
+    /// first and reads exactly that many characters.
     fn get_text(hwnd: HWND) -> String {
-        let mut buf = vec![0u16; 2048];
+        if hwnd.is_null() {
+            return String::new();
+        }
+        let len = unsafe { GetWindowTextLengthW(hwnd) };
+        if len <= 0 {
+            return String::new();
+        }
+        // Windows will not hand back more than this for a single-line edit.
+        let len = (len as usize).min(MAX_PATH_CHARS);
+        // GetWindowTextW writes at most len characters and appends no NUL
+        // when the buffer is exactly len long, which is why the buffer is
+        // sized len + 1.
+        let mut buf = vec![0u16; len + 1];
         let n = unsafe { GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32) };
         if n <= 0 {
             return String::new();
@@ -1516,6 +1557,8 @@ mod imp {
         page_index: usize,
         typewriter: Typewriter,
         body_full: String,
+        /// Reused by the typewriter timer so the 12 ms tick does not allocate.
+        reveal_scratch: String,
         // Window + persistent controls.
         hwnd: HWND,
         title_hwnd: HWND,
@@ -2422,23 +2465,23 @@ mod imp {
                 0
             }
             WM_TIMER if wparam == TIMER_TYPEWRITER => {
-                let update = with_state(|s| {
+                // The reveal runs on a 12 ms timer, so the text is built into
+                // a reusable buffer and handed to the window while still
+                // borrowed -- no per-tick `String` allocation.
+                let done = with_state(|s| {
                     let interval = s.typewriter.interval_ms();
                     if !s.typewriter.advance(interval) {
                         return None;
                     }
-                    Some((
-                        s.body_hwnd,
-                        s.typewriter.visible_text(),
-                        s.typewriter.is_complete(),
-                    ))
+                    s.typewriter.write_visible(&mut s.reveal_scratch);
+                    // `set_text` copies into the control, so the borrow ends
+                    // here; no clone is needed.
+                    set_text(s.body_hwnd, &s.reveal_scratch);
+                    Some(s.typewriter.is_complete())
                 })
                 .flatten();
-                if let Some((body, visible, complete)) = update {
-                    set_text(body, &visible);
-                    if complete {
-                        let _ = unsafe { KillTimer(hwnd, TIMER_TYPEWRITER) };
-                    }
+                if done == Some(true) {
+                    let _ = unsafe { KillTimer(hwnd, TIMER_TYPEWRITER) };
                 }
                 0
             }
@@ -2699,8 +2742,38 @@ mod imp {
         let face = wide("Cascadia Mono");
         let (font, title_font, bg_brush, surface_brush) = unsafe {
             (
-                CreateFontW(-16, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 49, pcw(&face)),
-                CreateFontW(-21, 0, 0, 0, 700, 0, 0, 0, 1, 0, 0, 5, 49, pcw(&face)),
+                CreateFontW(
+                    -(BODY_FONT_HEIGHT),
+                    0,
+                    0,
+                    0,
+                    FONT_WEIGHT_NORMAL,
+                    0,
+                    0,
+                    0,
+                    DEFAULT_CHARSET,
+                    OUT_DEFAULT_PRECIS,
+                    CLIP_DEFAULT_PRECIS,
+                    CLEARTYPE_QUALITY,
+                    FIXED_PITCH_FAMILY,
+                    pcw(&face),
+                ),
+                CreateFontW(
+                    -(TITLE_FONT_HEIGHT),
+                    0,
+                    0,
+                    0,
+                    FONT_WEIGHT_BOLD,
+                    0,
+                    0,
+                    0,
+                    DEFAULT_CHARSET,
+                    OUT_DEFAULT_PRECIS,
+                    CLIP_DEFAULT_PRECIS,
+                    CLEARTYPE_QUALITY,
+                    FIXED_PITCH_FAMILY,
+                    pcw(&face),
+                ),
                 CreateSolidBrush(bg_color),
                 CreateSolidBrush(colorref(theme.surface_rgb())),
             )
@@ -2710,6 +2783,7 @@ mod imp {
         let null = std::ptr::null_mut();
         let state = WizardState {
             body_full: String::new(),
+            reveal_scratch: String::new(),
             typewriter: Typewriter::new("", interval),
             pages,
             page_index: 0,

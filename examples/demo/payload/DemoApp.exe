@@ -1,1 +1,14 @@
 MZ-demo-placeholder
+
+This is NOT a Windows executable. It is a 19-byte text file whose name ends in
+.exe purely so the demo project has something for `app.main_exe` to point at.
+
+RustPacker's `pack` checks that `app.main_exe` exists in the payload, and that
+the *stub* is a real PE image -- but it does not (and cannot cheaply) prove
+that the app you are packing is a working program. So the demo builds and
+installs fine: the wizard runs, files land in %LOCALAPPDATA%\Programs\Demo App,
+the shortcut and the Apps & Features entry appear, and uninstall reverses all
+of it. Clicking the shortcut just fails to launch anything, because this file
+is not executable.
+
+To try a real install, drop a genuine .exe here named DemoApp.exe.
