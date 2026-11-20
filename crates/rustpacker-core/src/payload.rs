@@ -538,6 +538,25 @@ fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
 /// Returns `None` when `exe` carries no payload, which is exactly the case
 /// when the process *is* already an uninstaller: the caller should copy
 /// itself unchanged.
+/// Cheap structural check for a PE image: `MZ` magic, a plausible
+/// `e_lfanew`, and a `PE\0\0` signature at that offset.
+///
+/// Full PE parsing is deliberately out of scope — this only stops
+/// accidental or obvious non-executables from being packed as a stub.
+/// It lives in core because the CLI and the Builder Studio both gate
+/// their builds on it, and two copies of a security-adjacent check are
+/// an invitation to drift.
+pub fn looks_like_pe(bytes: &[u8]) -> bool {
+    if bytes.len() < 0x40 || &bytes[0..2] != b"MZ" {
+        return false;
+    }
+    let lfanew = u32::from_le_bytes([bytes[0x3C], bytes[0x3D], bytes[0x3E], bytes[0x3F]]) as usize;
+    if lfanew < 0x40 || lfanew.checked_add(4).is_none_or(|end| end > bytes.len()) {
+        return false;
+    }
+    &bytes[lfanew..lfanew + 4] == b"PE\0\0"
+}
+
 pub fn strip_payload(exe: &[u8]) -> Option<Vec<u8>> {
     let info = find_payload(exe).ok()?;
     let end = usize::try_from(info.payload_offset).ok()?;
@@ -1396,6 +1415,54 @@ mod tests {
         // End-of-central-directory signature present near the tail.
         assert!(zip.windows(4).any(|w| w == b"PK\x05\x06"));
         assert_eq!(crc32(b"abc"), 0x3524_41C2);
+    }
+
+    /// Build a minimal synthetic PE image: DOS header of `header_len`
+    /// bytes with `e_lfanew` at 0x3C, and the given signature at
+    /// `e_lfanew` (if it fits).
+    fn pe_image(total_len: usize, e_lfanew: u32, signature: &[u8; 4]) -> Vec<u8> {
+        let mut bytes = vec![0u8; total_len];
+        if total_len >= 2 {
+            bytes[0..2].copy_from_slice(b"MZ");
+        }
+        if total_len >= 0x40 {
+            bytes[0x3C..0x40].copy_from_slice(&e_lfanew.to_le_bytes());
+        }
+        let at = e_lfanew as usize;
+        if at + 4 <= total_len {
+            bytes[at..at + 4].copy_from_slice(signature);
+        }
+        bytes
+    }
+
+    #[test]
+    fn pe_check_accepts_a_plausible_image_and_rejects_the_rest() {
+        // The shape every real stub has.
+        assert!(looks_like_pe(&pe_image(0x200, 0x80, b"PE\0\0")));
+        // The smallest acceptable header: signature right at 0x40.
+        assert!(looks_like_pe(&pe_image(0x44, 0x40, b"PE\0\0")));
+
+        // Too short to hold a DOS header at all.
+        assert!(!looks_like_pe(&[]));
+        assert!(!looks_like_pe(b"MZ"));
+        assert!(!looks_like_pe(&pe_image(0x3F, 0x40, b"PE\0\0")));
+
+        // Wrong magic.
+        let mut not_mz = pe_image(0x200, 0x80, b"PE\0\0");
+        not_mz[0] = b'Z';
+        assert!(!looks_like_pe(&not_mz));
+
+        // e_lfanew pointing back into the DOS header, even at a
+        // signature planted there.
+        assert!(!looks_like_pe(&pe_image(0x200, 0x20, b"PE\0\0")));
+
+        // e_lfanew at or beyond the end, and a signature cut in half by
+        // the end of the file.
+        assert!(!looks_like_pe(&pe_image(0x200, 0x200, b"PE\0\0")));
+        assert!(!looks_like_pe(&pe_image(0x200, 0x1FE, b"PE\0\0")));
+
+        // Right shape, wrong signature.
+        assert!(!looks_like_pe(&pe_image(0x200, 0x80, b"PX\0\0")));
     }
 
     /// M14: the portable ZIP is assembled here, once, so the CLI and the

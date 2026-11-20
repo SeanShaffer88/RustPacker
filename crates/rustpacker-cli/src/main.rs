@@ -5,7 +5,7 @@
 //! extract the resulting `Setup.exe`. Argument parsing is hand-rolled
 //! (standard library only); `--json` selects machine-readable output.
 
-use rustpacker_core::payload::{sha256_hex, sha256sums_txt};
+use rustpacker_core::payload::{looks_like_pe, sha256_hex, sha256sums_txt};
 use rustpacker_core::{
     build_portable_zip, extract_payload, find_payload, pack_directory, read_manifest,
     safe_file_name, PayloadManifest, ProjectConfig,
@@ -384,21 +384,6 @@ fn is_empty_array_line(line: &str, name: &str) -> bool {
         None => return false,
     };
     rest.trim() == "[]"
-}
-
-/// Cheap structural check for a PE image: `MZ` magic, a plausible
-/// `e_lfanew`, and a `PE\0\0` signature at that offset. Full PE parsing
-/// is deliberately out of scope — this only stops accidental or obvious
-/// non-executables from being packed as a stub.
-fn looks_like_pe(bytes: &[u8]) -> bool {
-    if bytes.len() < 0x40 || &bytes[0..2] != b"MZ" {
-        return false;
-    }
-    let lfanew = u32::from_le_bytes([bytes[0x3C], bytes[0x3D], bytes[0x3E], bytes[0x3F]]) as usize;
-    if lfanew < 0x40 || lfanew.checked_add(4).is_none_or(|end| end > bytes.len()) {
-        return false;
-    }
-    &bytes[lfanew..lfanew + 4] == b"PE\0\0"
 }
 
 /// Build the example project TOML from `ProjectConfig::default()`
