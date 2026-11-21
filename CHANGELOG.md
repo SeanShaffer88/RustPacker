@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-11-20
+
 ### Fixed
 
 - **Builder Studio text clipping.** Fit step labels, expert controls, the
@@ -258,7 +260,8 @@ in this release:
 - `examples/demo/payload/DemoApp.exe` is a text placeholder, not a real
   executable, so the demo installs a file that will not launch.
 
-[Unreleased]: https://github.com/SeanShaffer88/RustPacker/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/SeanShaffer88/RustPacker/compare/v0.4.3...HEAD
+[0.4.3]: https://github.com/SeanShaffer88/RustPacker/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/SeanShaffer88/RustPacker/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/SeanShaffer88/RustPacker/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/SeanShaffer88/RustPacker/compare/v0.3.0...v0.4.0
