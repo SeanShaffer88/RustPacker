@@ -127,23 +127,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rel="target/x86_64-pc-windows-msvc/release"
           name="RustPacker-v${version}-x64"
 
           mkdir -p upload
-          # The standalone tools: run these from anywhere, no install needed.
-          cp "$rel/rustpacker-cli.exe" "upload/RustPacker-v${version}-x64-cli.exe"
-          cp "$rel/rustpacker-gui.exe" "upload/RustPacker-v${version}-x64-studio.exe"
-          # The installer produced by the step above (`pack` names it after the
-          # project's app name and version).
+          # Only two downloads ship: the installer produced by the step
+          # above (`pack` names it after the project's app name and
+          # version) and the portable ZIP. The CLI and Builder Studio are
+          # inside both (they are the release payload); they are not
+          # separate assets any more.
           cp dist/RustPacker-v"${version}"-Setup.exe "upload/${name}-Setup.exe"
           cp dist/RustPacker-v"${version}"-Portable.zip "upload/${name}-Portable.zip"
           rm -rf dist
-
-          # One manifest covering every asset, so a downloader can check what
-          # they got. Generated last, after every file is final.
-          ( cd upload && sha256sum ./* > SHA256SUMS.txt && cat SHA256SUMS.txt )
-          mv upload/SHA256SUMS.txt .
+          ls -l upload
 
       - name: Extract release notes from the CHANGELOG
         shell: bash
@@ -196,7 +191,6 @@ jobs:
           path: |
             upload/*.exe
             upload/*.zip
-            SHA256SUMS.txt
             release-notes-full.md
 
       - name: Create the GitHub release
@@ -209,8 +203,5 @@ jobs:
             --title "RustPacker $tag" \
             --notes-file release-notes-full.md \
             --verify-tag \
-            upload/RustPacker-v"${version}"-x64-cli.exe \
-            upload/RustPacker-v"${version}"-x64-studio.exe \
             upload/RustPacker-v"${version}"-x64-Setup.exe \
-            upload/RustPacker-v"${version}"-x64-Portable.zip \
-            SHA256SUMS.txt
+            upload/RustPacker-v"${version}"-x64-Portable.zip

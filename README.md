@@ -144,8 +144,8 @@ Releases are cut by tag: bump `version` in `Cargo.toml`, add the matching
 section to `CHANGELOG.md`, then push a `v*` tag.
 
 ```text
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.3.0
+git push origin v0.3.0
 ```
 
 `.github/workflows/release.yml` then refuses to continue if the tag and
@@ -156,15 +156,12 @@ freshly built CLI and Builder Studio as the payload. The resulting installer
 is then re-read with `verify` and `list` before anything is published, so a
 broken `pack` or stub fails the release instead of shipping.
 
-Each release carries:
+Each release carries exactly two files:
 
 | Asset | What it is |
 |---|---|
-| `RustPacker-v<version>-x64-Setup.exe` | The installer, packed by RustPacker. Per-user, Windows 11 x64. |
+| `RustPacker-v<version>-x64-Setup.exe` | The installer, packed by RustPacker. Per-user, Windows 11 x64; installs the CLI and the Builder Studio. |
 | `RustPacker-v<version>-x64-Portable.zip` | The same files, unpacked — no install needed. |
-| `RustPacker-v<version>-x64-cli.exe` | Standalone CLI. |
-| `RustPacker-v<version>-x64-studio.exe` | Standalone Builder Studio GUI. |
-| `SHA256SUMS.txt` | SHA-256 of every asset above. |
 
 The release notes are extracted from `CHANGELOG.md` automatically.
 
@@ -175,8 +172,7 @@ The release notes are extracted from `CHANGELOG.md` automatically.
 - Stack: Rust, `windows-sys` (pure Win32), workspace crates
   `rustpacker-core`, `rustpacker-stub`, `rustpacker-cli`, `rustpacker-gui`.
 - Release shape: `RustPacker-v{VERSION}-x64-Setup.exe` +
-  `RustPacker-v{VERSION}-x64-Portable.zip` + the standalone
-  `-cli`/`-studio` binaries + `SHA256SUMS.txt`, produced by
+  `RustPacker-v{VERSION}-x64-Portable.zip`, produced by
   `.github/workflows/release.yml` (see [Releases](#releases)).
 
 ## License
