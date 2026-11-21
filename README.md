@@ -11,20 +11,20 @@ or WebView2 runtime.
 
 ## What it does
 
-- **Builder Studio (`rustpacker-gui`)** — Gruvbox-themed studio (light
-  cream chrome, deep-green toolbar) with a menu bar, toolbar, grouped
+- **Builder Studio (`rustpacker-gui`)** — reference-matched studio with
+  warm-white surfaces, pale-green panels, a forest-green title/toolbar,
+  amber actions, grouped
   section navigation, a four-step project flow (Package identity →
   Payload → User experience → Build), an expert-controls strip for the
   advanced pages, and a per-section editor, plus a live preview of the
-  installer wizard — in the project's own Gruvbox dark terminal palette —
-  including the finish page exactly as the end user will see it.
+  installer wizard in the project's own configurable colors.
 - **CLI (`rustpacker-cli`)** — every capability from the command line:
   `init`, `validate`, `pack`, `verify`, `list`, `extract`, `schema`, with
   `--json` output and deterministic exit codes (0 ok, 2 usage,
   3 validation, 4 I/O or payload error).
-- **Generated installer (`Setup.exe`)** — compact classic wizard with no
-  sidebar graphic, a terminal look (monospace font, Gruvbox palette),
-  and a fast typewriter effect (12 ms default) on each page's text that
+- **Generated installer (`Setup.exe`)** — compact classic wizard with a
+  clean light palette and standard Windows UI typography, plus a fast
+  typewriter effect (12 ms default) on each page's text that
   completes instantly on click, Space, or Enter. Per-Monitor DPI V2 aware,
   no outer window scrollbars.
 - **Payload format** — files are packed into a zstd-compressed archive
