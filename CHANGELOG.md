@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-11-21
+
+### Fixed
+
+- **Builder Studio high-DPI scaling.** Scale the layout and fonts for system
+  and per-monitor DPI changes so the interface remains readable across displays.
+
 ## [0.4.3] - 2026-11-20
 
 ### Fixed
@@ -260,7 +267,8 @@ in this release:
 - `examples/demo/payload/DemoApp.exe` is a text placeholder, not a real
   executable, so the demo installs a file that will not launch.
 
-[Unreleased]: https://github.com/SeanShaffer88/RustPacker/compare/v0.4.3...HEAD
+[Unreleased]: https://github.com/SeanShaffer88/RustPacker/compare/v0.4.4...HEAD
+[0.4.4]: https://github.com/SeanShaffer88/RustPacker/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/SeanShaffer88/RustPacker/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/SeanShaffer88/RustPacker/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/SeanShaffer88/RustPacker/compare/v0.4.0...v0.4.1
