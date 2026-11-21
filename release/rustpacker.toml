@@ -18,7 +18,7 @@ name = "RustPacker"
 # Must agree with the workspace version in Cargo.toml: this string names
 # the release assets (`RustPacker-v<version>-Setup.exe`) and becomes the
 # installed app's version. `release.yml` refuses to build if they differ.
-version = "0.4.1"
+version = "0.4.2"
 publisher = "Sean Shaffer"
 # Stable identifier for the Apps & Features entry and the registry keys; do
 # not change it between releases or upgrades stop replacing the old entry.

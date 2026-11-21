@@ -6,6 +6,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-11-20
+
+### Changed
+
+- **Reference-matching Builder Studio layout.** Open to the New Project
+  overview with primary navigation, four-step cards, a build action, expert
+  controls, and a compact installer preview.
+
 ## [0.4.1] - 2026-11-20
 
 ### Changed
@@ -245,7 +253,9 @@ in this release:
 - `examples/demo/payload/DemoApp.exe` is a text placeholder, not a real
   executable, so the demo installs a file that will not launch.
 
-[Unreleased]: https://github.com/SeanShaffer88/RustPacker/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/SeanShaffer88/RustPacker/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/SeanShaffer88/RustPacker/compare/v0.4.1...v0.4.2
+[0.4.1]: https://github.com/SeanShaffer88/RustPacker/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/SeanShaffer88/RustPacker/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/SeanShaffer88/RustPacker/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/SeanShaffer88/RustPacker/compare/v0.1.0...v0.2.0
