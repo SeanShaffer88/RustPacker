@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Builder Studio text clipping.** Fit step labels, expert controls, the
+  sidebar hint, and installer preview copy within their available space.
+
 ## [0.4.2] - 2026-11-20
 
 ### Changed

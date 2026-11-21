@@ -704,6 +704,8 @@ mod win {
         font_ui: HFONT,
         font_bold: HFONT,
         font_small: HFONT,
+        font_small_bold: HFONT,
+        font_tiny: HFONT,
         font_mono: HFONT,
         font_title: HFONT,
         brush_bg: HBRUSH,
@@ -781,6 +783,8 @@ mod win {
                 font_ui,
                 font_bold: unsafe { make_font("Segoe UI", -15, true) },
                 font_small: unsafe { make_font("Segoe UI", -11, false) },
+                font_small_bold: unsafe { make_font("Segoe UI", -11, true) },
+                font_tiny: unsafe { make_font("Segoe UI", -10, false) },
                 font_mono,
                 font_title,
                 // Assigned by run() from the window-class background brush.
@@ -811,6 +815,8 @@ mod win {
                 let _ = DeleteObject(self.font_ui);
                 let _ = DeleteObject(self.font_bold);
                 let _ = DeleteObject(self.font_small);
+                let _ = DeleteObject(self.font_small_bold);
+                let _ = DeleteObject(self.font_tiny);
                 let _ = DeleteObject(self.font_mono);
                 let _ = DeleteObject(self.font_title);
                 let _ = DeleteObject(self.brush_surface);
@@ -1243,7 +1249,7 @@ mod win {
                     bottom: rect.top + 56,
                 },
                 app.col_muted,
-                app.font_ui,
+                app.font_small,
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE,
             );
             draw_item_text(
@@ -1260,7 +1266,7 @@ mod win {
                 } else {
                     app.col_text
                 },
-                app.font_bold,
+                app.font_small_bold,
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE,
             );
             draw_item_text(
@@ -1273,7 +1279,7 @@ mod win {
                     bottom: rect.bottom - 6,
                 },
                 app.col_muted,
-                app.font_ui,
+                app.font_small,
                 DT_LEFT | DT_WORDBREAK,
             );
             let state_marker = if step < current {
@@ -1306,13 +1312,13 @@ mod win {
                 hdc,
                 &get_text(item.hwndItem),
                 RECT {
-                    left: rect.left + 4,
+                    left: rect.left + 2,
                     top: rect.top + 1,
-                    right: rect.right - 4,
+                    right: rect.right - 2,
                     bottom: rect.bottom - 1,
                 },
                 app.pv_col_text,
-                app.font_ui,
+                app.font_tiny,
                 DT_CENTER | DT_VCENTER | DT_SINGLELINE,
             );
             return 1;
@@ -1395,9 +1401,9 @@ mod win {
                 hdc,
                 EXPERT_PAGES[index].0,
                 RECT {
-                    left: rect.left + 3,
+                    left: rect.left + 1,
                     top: rect.top + 1,
-                    right: rect.right - 3,
+                    right: rect.right - 1,
                     bottom: rect.bottom - 1,
                 },
                 if selected {
@@ -1405,7 +1411,7 @@ mod win {
                 } else {
                     app.col_muted
                 },
-                if selected { app.font_bold } else { app.font_ui },
+                app.font_tiny,
                 DT_CENTER | DT_VCENTER | DT_SINGLELINE,
             );
             return 1;
@@ -1417,13 +1423,13 @@ mod win {
                 hdc,
                 &get_text(item.hwndItem),
                 RECT {
-                    left: rect.left + 6,
+                    left: rect.left + 2,
                     top: rect.top + 1,
-                    right: rect.right - 6,
+                    right: rect.right - 2,
                     bottom: rect.bottom - 1,
                 },
                 colorref(TOOLBAR_TEXT),
-                app.font_bold,
+                app.font_tiny,
                 DT_CENTER | DT_VCENTER | DT_SINGLELINE,
             );
             return 1;
@@ -1839,6 +1845,7 @@ mod win {
             "Create a new installer project and follow the four steps to build your package.",
             0,
         );
+        set_font(app.c.nav_hint, app.font_small);
 
         // Centre header: eyebrow (current step), title, hint, step strip.
         app.c.lbl_eyebrow = mk_label(app, parent, "", 0);
@@ -1868,6 +1875,7 @@ mod win {
             "Advanced configuration options for professional use.",
             0,
         );
+        set_font(app.c.lbl_expert_hint, app.font_small);
         for (name, _) in EXPERT_PAGES {
             let b = mk_button(
                 app,
@@ -1893,7 +1901,7 @@ mod win {
         app.c.pv_title = mk_label(app, parent, "", ID_PV_TITLE);
         set_font(app.c.pv_title, app.font_bold);
         app.c.pv_body = mk_label(app, parent, "", ID_PV_BODY);
-        set_font(app.c.pv_body, app.font_small);
+        set_font(app.c.pv_body, app.font_tiny);
         app.c.pv_desktop = mk_check(
             app,
             parent,
@@ -1930,9 +1938,9 @@ mod win {
             app.font_small,
         );
         app.c.pv_btn_cancel = mk_button(app, parent, "Cancel", ID_PV_BTN_CANCEL);
-        set_font(app.c.pv_btn_cancel, app.font_small);
+        set_font(app.c.pv_btn_cancel, app.font_tiny);
         app.c.pv_btn_page = mk_button(app, parent, "Next", ID_PV_BTN_PAGE);
-        set_font(app.c.pv_btn_page, app.font_small);
+        set_font(app.c.pv_btn_page, app.font_tiny);
     }
 
     unsafe fn build_pages(app: &mut App, parent: HWND) {
@@ -2398,9 +2406,9 @@ mod win {
             move_to(button, x, g.y + y, w, 38);
         }
         show(app.c.nav_hint_title, true);
-        move_to(app.c.nav_hint_title, x, g.y + g.h - 92, w, 20);
+        move_to(app.c.nav_hint_title, x, g.y + g.h - 98, w, 20);
         show(app.c.nav_hint, true);
-        move_to(app.c.nav_hint, x, g.y + g.h - 68, w, 58);
+        move_to(app.c.nav_hint, x, g.y + g.h - 74, w, 64);
     }
 
     /// Show one editor page in the centre and lay out its rows. Switching
@@ -2722,7 +2730,7 @@ mod win {
         );
         let visible_count = boxes.iter().filter(|(_, vis, _)| on_finish && *vis).count() as i32;
         let stack_h = visible_count * 18;
-        let body_y = pv.y + topbar_h + 34;
+        let body_y = pv.y + topbar_h + 31;
         let body_h = (footer_y - body_y - stack_h - 8).max(38);
         move_to(app.c.pv_body, content_x, body_y, content_w, body_h);
         let cancel_x = pv.x + pv.w - 112;
