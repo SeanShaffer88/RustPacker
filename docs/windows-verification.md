@@ -93,6 +93,7 @@ or **n/a** in the Result column.
 | F10 | Compare the launch screen with the supplied reference | Four project-navigation items, four wide step cards, build call-to-action, expert strip and compact wizard preview are present; warm-white, pale-green, forest-green and amber colors match; no Gruvbox or default-gray controls | |
 | F11 | Click each of the four step cards (Package identity, Payload, User experience, Build) | Lands on the matching editor page; cards show completed/current/upcoming states and the heading names the current task | |
 | F12 | Use the expert-controls strip (Shortcuts, Registry, Associations, Prerequisites, Processes, Theme) | Each button jumps to that advanced page; the strip spans the lower editor/preview area and does not cover editor rows | |
+| F13 | Resize Studio to its minimum window size and inspect the home screen | Step titles, descriptions, sidebar hint, preview copy, and expert-control labels are fully visible; no text is cut off | |
 
 ## G. Failure honesty
 
