@@ -46,8 +46,8 @@ mod imp {
     use rustpacker_core::{
         extract_payload_with_progress, find_payload, read_manifest, sha256_hex,
         validate_install_dir, FinishSelection, InstallJournal, InstallLog, InstallScope,
-        JournalAction, PayloadManifest, Prerequisite, ProjectConfig, Typewriter,
-        JOURNAL_FILE_NAME, LOG_FILE_NAME, UNINSTALLER_FILE_NAME,
+        JournalAction, PayloadManifest, Prerequisite, ProjectConfig, Typewriter, JOURNAL_FILE_NAME,
+        LOG_FILE_NAME, UNINSTALLER_FILE_NAME,
     };
     use std::cell::RefCell;
     use std::collections::HashSet;
