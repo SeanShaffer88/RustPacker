@@ -11,16 +11,19 @@ or WebView2 runtime.
 
 ## What it does
 
-- **Builder Studio (`rustpacker-gui`)** — dark One Dark Pro studio with a
-  menu bar, toolbar, grouped section navigation and a per-section editor,
-  plus a live preview of the installer wizard, including the finish page
-  exactly as the end user will see it.
+- **Builder Studio (`rustpacker-gui`)** — Gruvbox-themed studio (light
+  cream chrome, deep-green toolbar) with a menu bar, toolbar, grouped
+  section navigation, a four-step project flow (Package identity →
+  Payload → User experience → Build), an expert-controls strip for the
+  advanced pages, and a per-section editor, plus a live preview of the
+  installer wizard — in the project's own Gruvbox dark terminal palette —
+  including the finish page exactly as the end user will see it.
 - **CLI (`rustpacker-cli`)** — every capability from the command line:
   `init`, `validate`, `pack`, `verify`, `list`, `extract`, `schema`, with
   `--json` output and deterministic exit codes (0 ok, 2 usage,
   3 validation, 4 I/O or payload error).
 - **Generated installer (`Setup.exe`)** — compact classic wizard with no
-  sidebar graphic, a terminal look (monospace font, One Dark Pro palette),
+  sidebar graphic, a terminal look (monospace font, Gruvbox palette),
   and a fast typewriter effect (12 ms default) on each page's text that
   completes instantly on click, Space, or Enter. Per-Monitor DPI V2 aware,
   no outer window scrollbars.

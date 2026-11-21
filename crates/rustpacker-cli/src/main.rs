@@ -446,7 +446,7 @@ fn example_toml() -> Result<String, String> {
             }
             "[theme]" => {
                 out.push_str(
-                    "# [theme] - One Dark Pro terminal palette for the installer wizard.\n",
+                    "# [theme] - Gruvbox terminal palette for the installer wizard.\n",
                 );
             }
             _ => {}
