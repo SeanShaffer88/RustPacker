@@ -81,18 +81,18 @@ or **n/a** in the Result column.
 
 | # | Check | Expected | Result |
 |---|-------|----------|--------|
-| F1 | Launch `rustpacker-gui.exe` | Studio opens; no console window; icon present | |
+| F1 | Launch `rustpacker-gui.exe` | Reference-style new-project home opens; no console window; icon present | |
 | F2 | Load the test project; toggle tray support and the hide-options | Preview checkboxes keep your earlier ticks; newly appearing options start at their defaults | |
 | F3 | Tick "Also build portable .zip" and Build | `Setup.exe`, `<App>-v<version>-Portable.zip` and a `SHA256SUMS.txt` covering **both** appear in the output folder; status reports both hashes | |
 | F4 | Unzip the portable build | Payload files plus `rustpacker-portable.txt`; the exe runs from the unzipped folder | |
 | F5 | Build with an app name containing `\` or `:` (e.g. `A/B`) | Output names are sanitised identically to the CLI's — no stray subfolders | |
 | F6 | Switch between editor pages (Application, Install settings, Shortcuts, …) with unsaved edits | No edit is lost; each page shows its own fields and the centre title/hint updates | |
 | F7 | Add, edit and remove a shortcut, a registry entry, a file association, a prerequisite and a process check; save and reload the project | All entries survive the round-trip in the project file, and Validate flags a deliberately broken entry | |
-| F8 | Collapse navigation groups, hide the navigation and preview panels, resize the window | Layout stays usable down to the minimum size; nothing overlaps or disappears | |
-| F9 | Use the top actions and panel toggles | New/Open/Save/Validate/Build and both panel toggles work; the native menu row is absent | |
-| F10 | Open the Studio and compare its colors to the reference | Warm-white canvas, pale-green surfaces, forest-green title/toolbar, amber build action, and no default gray buttons; preview has a green rail and light page | |
+| F8 | Hide navigation and preview panels, resize the window | Layout stays usable down to the minimum size; nothing overlaps or disappears | |
+| F9 | Open a project and use the editor actions | New/Open/Save/Validate/Build and both panel toggles work; the native menu row is absent | |
+| F10 | Compare the launch screen with the supplied reference | Four project-navigation items, four wide step cards, build call-to-action, expert strip and compact wizard preview are present; warm-white, pale-green, forest-green and amber colors match; no Gruvbox or default-gray controls | |
 | F11 | Click each of the four step cards (Package identity, Payload, User experience, Build) | Lands on the matching editor page; cards show completed/current/upcoming states and the heading names the current task | |
-| F12 | Use the expert-controls strip (Shortcuts, Registry, Associations, Prerequisites, Processes, Theme) | Each button jumps to that advanced page; the strip stays visible at the editor's bottom at the minimum window size and the build log/list rows above it are not covered | |
+| F12 | Use the expert-controls strip (Shortcuts, Registry, Associations, Prerequisites, Processes, Theme) | Each button jumps to that advanced page; the strip spans the lower editor/preview area and does not cover editor rows | |
 
 ## G. Failure honesty
 
