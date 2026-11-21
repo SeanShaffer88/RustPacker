@@ -12,7 +12,7 @@ name = "rustpacker-cli"
 path = "src/main.rs"
 
 [dependencies]
-rustpacker-core = { path = "../rustpacker-core", version = "0.3.0" }
+rustpacker-core = { path = "../rustpacker-core", version = "0.4.0" }
 
 [dev-dependencies]
 serde_json = "1"
