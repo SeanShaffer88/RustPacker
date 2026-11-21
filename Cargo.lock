@@ -167,7 +167,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rustpacker-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "rustpacker-core",
  "serde_json",
@@ -175,7 +175,7 @@ dependencies = [
 
 [[package]]
 name = "rustpacker-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -186,7 +186,7 @@ dependencies = [
 
 [[package]]
 name = "rustpacker-gui"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "rustpacker-core",
  "windows-sys",
@@ -194,7 +194,7 @@ dependencies = [
 
 [[package]]
 name = "rustpacker-stub"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "rustpacker-core",
  "windows-sys",

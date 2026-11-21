@@ -147,8 +147,8 @@ Releases are cut by tag: bump `version` in `Cargo.toml`, add the matching
 section to `CHANGELOG.md`, then push a `v*` tag.
 
 ```text
-git tag v0.3.0
-git push origin v0.3.0
+git tag v0.4.0
+git push origin v0.4.0
 ```
 
 `.github/workflows/release.yml` then refuses to continue if the tag and
