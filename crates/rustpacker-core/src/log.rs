@@ -92,6 +92,15 @@ impl InstallLog {
     /// caller is expected to carry on regardless: [`InstallLog::to_stderr`]
     /// gives a working log when the file cannot be written.
     pub fn open(path: &Path) -> Result<Self, String> {
+        // The log lives in the install folder, which usually does not
+        // exist yet when the installer starts: create it, or every fresh
+        // install silently ends up with no log at all. Best effort — a
+        // failure here is reported by the open below, as before.
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+        }
         let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
         if size > MAX_LOG_BYTES {
             // Keep exactly one previous generation. Rotation failing is not
@@ -293,6 +302,19 @@ mod tests {
         // CRLF, so Notepad does not show one long line.
         assert!(text.contains("\r\n"));
         assert!(log.bytes_written() > 0);
+    }
+
+    #[test]
+    fn open_creates_a_missing_parent_folder() {
+        // Regression: the wizard opens the log before the install folder
+        // exists, so a fresh install used to end up with no log at all.
+        let dir = ScratchDir::new("rustpacker-log-parent");
+        let path = dir.join("not").join("created").join(LOG_FILE_NAME);
+        let mut log = InstallLog::open(&path).expect("open should create parents");
+        log.note("first line");
+        drop(log);
+        let text = std::fs::read_to_string(&path).expect("log should exist");
+        assert!(text.contains("first line"), "{text}");
     }
 
     #[test]
