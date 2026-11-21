@@ -55,7 +55,8 @@ mod win {
         BST_CHECKED, BST_UNCHECKED, DRAWITEMSTRUCT, ODS_DISABLED, ODS_HOTLIGHT, ODS_SELECTED,
     };
     use windows_sys::Win32::UI::HiDpi::{
-        SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+        GetDpiForSystem, GetDpiForWindow, SetProcessDpiAwarenessContext,
+        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     };
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
     /// Icon resource id, as embedded by `build.rs`. `LoadIconW` takes a
@@ -64,18 +65,46 @@ mod win {
     const APP_ICON_ID: windows_sys::core::PCWSTR = 1 as _;
 
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetMessageW,
+        CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetMessageW, GetWindow,
         GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, IsDialogMessageW, LoadCursorW,
         LoadIconW, MessageBoxW, MoveWindow, PostQuitMessage, RegisterClassW, SendMessageW,
-        SetWindowLongPtrW, SetWindowTextW, ShowWindow, TranslateMessage, BM_GETCHECK, BM_SETCHECK,
-        BN_CLICKED, BS_AUTOCHECKBOX, BS_OWNERDRAW, CBN_SELCHANGE, CBS_DROPDOWNLIST, CB_ADDSTRING,
-        CB_GETCURSEL, CB_SETCURSEL, CREATESTRUCTW, CW_USEDEFAULT, EN_CHANGE, ES_AUTOHSCROLL,
-        ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY, GWLP_USERDATA, HMENU, IDC_ARROW, MB_ICONERROR,
-        MB_OK, MINMAXINFO, MSG, SW_HIDE, SW_SHOW, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN,
-        WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DRAWITEM, WM_GETMINMAXINFO, WM_NCCREATE,
+        SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage, BM_GETCHECK,
+        BM_SETCHECK, BN_CLICKED, BS_AUTOCHECKBOX, BS_OWNERDRAW, CBN_SELCHANGE, CBS_DROPDOWNLIST,
+        CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, CREATESTRUCTW, CW_USEDEFAULT, EN_CHANGE,
+        ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY, GWLP_USERDATA, GW_CHILD,
+        GW_HWNDNEXT, HMENU, IDC_ARROW, MB_ICONERROR, MB_OK, MINMAXINFO, MSG, SWP_NOACTIVATE,
+        SWP_NOZORDER, SW_HIDE, SW_SHOW, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN, WM_CTLCOLOREDIT,
+        WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_DRAWITEM, WM_GETMINMAXINFO, WM_NCCREATE,
         WM_SETFONT, WM_SIZE, WNDCLASSW, WS_BORDER, WS_CHILD, WS_CLIPCHILDREN, WS_OVERLAPPEDWINDOW,
         WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
     };
+
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    const BASE_DPI: u32 = 96;
+    static UI_DPI: AtomicU32 = AtomicU32::new(BASE_DPI);
+
+    fn scale_for_dpi(value: i32, dpi: u32) -> i32 {
+        let dpi = dpi.max(1) as i64;
+        let value = value as i64;
+        let rounding = if value >= 0 {
+            BASE_DPI as i64 / 2
+        } else {
+            -(BASE_DPI as i64 / 2)
+        };
+        ((value * dpi + rounding) / BASE_DPI as i64).clamp(i32::MIN as i64, i32::MAX as i64) as i32
+    }
+
+    fn scale_px(value: i32) -> i32 {
+        scale_for_dpi(value, UI_DPI.load(Ordering::Relaxed))
+    }
+
+    fn unscale_px(value: i32) -> i32 {
+        let dpi = UI_DPI.load(Ordering::Relaxed).max(1) as i64;
+        let value = value as i64;
+        let rounding = if value >= 0 { dpi / 2 } else { -(dpi / 2) };
+        ((value * BASE_DPI as i64 + rounding) / dpi).clamp(i32::MIN as i64, i32::MAX as i64) as i32
+    }
 
     // ---- control ids -------------------------------------------------------
     const ID_TOOLBAR: i32 = 1000;
@@ -462,7 +491,14 @@ mod win {
     }
 
     unsafe fn move_to(hwnd: HWND, x: i32, y: i32, w: i32, h: i32) {
-        let _ = MoveWindow(hwnd, x, y, w.max(0), h.max(0), 1);
+        let _ = MoveWindow(
+            hwnd,
+            scale_px(x),
+            scale_px(y),
+            scale_px(w).max(0),
+            scale_px(h).max(0),
+            1,
+        );
     }
 
     /// The centre editor has dozens of fields; they are found by control id
@@ -695,6 +731,7 @@ mod win {
         left_collapsed: bool,
         right_collapsed: bool,
         refreshing: bool,
+        dpi: u32,
         hinstance: HINSTANCE,
         c: Ctrls,
         geom_left: Rect,
@@ -774,6 +811,7 @@ mod win {
                 left_collapsed: false,
                 right_collapsed: false,
                 refreshing: false,
+                dpi: UI_DPI.load(Ordering::Relaxed),
                 hinstance,
                 c: Ctrls::null(),
                 geom_left: Rect::default(),
@@ -807,6 +845,34 @@ mod win {
                 pv_col_accent: colorref(wizard.accent_rgb()),
             }
         }
+
+        fn rebuild_fonts(&mut self, dpi: u32) -> Option<[HFONT; 7]> {
+            let dpi = if dpi == 0 { self.dpi } else { dpi.max(48) };
+            if self.dpi == dpi {
+                return None;
+            }
+
+            let old = [
+                self.font_ui,
+                self.font_bold,
+                self.font_small,
+                self.font_small_bold,
+                self.font_tiny,
+                self.font_mono,
+                self.font_title,
+            ];
+            self.dpi = dpi;
+            UI_DPI.store(dpi, Ordering::Relaxed);
+            let (font_ui, font_mono, font_title) = unsafe { make_fonts() };
+            self.font_ui = font_ui;
+            self.font_bold = unsafe { make_font("Segoe UI", -15, true) };
+            self.font_small = unsafe { make_font("Segoe UI", -11, false) };
+            self.font_small_bold = unsafe { make_font("Segoe UI", -11, true) };
+            self.font_tiny = unsafe { make_font("Segoe UI", -10, false) };
+            self.font_mono = font_mono;
+            self.font_title = font_title;
+            Some(old)
+        }
     }
 
     impl Drop for App {
@@ -831,10 +897,16 @@ mod win {
         }
     }
 
+    unsafe fn delete_fonts(fonts: [HFONT; 7]) {
+        for font in fonts {
+            let _ = DeleteObject(font);
+        }
+    }
+
     unsafe fn make_font(face: &str, height: i32, bold: bool) -> HFONT {
         let w = wide(face);
         CreateFontW(
-            height,
+            scale_px(height),
             0,
             0,
             0,
@@ -889,6 +961,8 @@ mod win {
         unsafe {
             // Per-Monitor DPI V2 awareness (best effort: older hosts ignore it).
             let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            let system_dpi = GetDpiForSystem().max(BASE_DPI);
+            UI_DPI.store(system_dpi, Ordering::Relaxed);
 
             let theme = studio_theme();
             let hinstance: HINSTANCE = GetModuleHandleW(std::ptr::null());
@@ -927,8 +1001,8 @@ mod win {
                 WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
-                1024,
-                640,
+                scale_for_dpi(1024, system_dpi),
+                scale_for_dpi(640, system_dpi),
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
                 hinstance,
@@ -983,6 +1057,9 @@ mod win {
             }
             WM_CREATE => {
                 if let Some(app) = app_ref(hwnd) {
+                    if let Some(old_fonts) = app.rebuild_fonts(GetDpiForWindow(hwnd)) {
+                        delete_fonts(old_fonts);
+                    }
                     create_controls(app, hwnd);
                     layout(app, hwnd);
                     apply_config_to_ui(app);
@@ -1008,8 +1085,31 @@ mod win {
             }
             WM_GETMINMAXINFO => {
                 let mmi = &mut *(lparam as *mut MINMAXINFO);
-                mmi.ptMinTrackSize.x = 980;
-                mmi.ptMinTrackSize.y = 600;
+                mmi.ptMinTrackSize.x = scale_px(980);
+                mmi.ptMinTrackSize.y = scale_px(600);
+                0
+            }
+            WM_DPICHANGED => {
+                if let Some(app) = app_ref(hwnd) {
+                    let dpi = (wparam & 0xFFFF) as u32;
+                    let old_fonts = app.rebuild_fonts(dpi);
+                    apply_control_fonts(app, hwnd);
+                    refresh_steps(app);
+                    let suggested = &*(lparam as *const RECT);
+                    let _ = SetWindowPos(
+                        hwnd,
+                        std::ptr::null_mut(),
+                        suggested.left,
+                        suggested.top,
+                        suggested.right - suggested.left,
+                        suggested.bottom - suggested.top,
+                        SWP_NOACTIVATE | SWP_NOZORDER,
+                    );
+                    layout(app, hwnd);
+                    if let Some(old_fonts) = old_fonts {
+                        delete_fonts(old_fonts);
+                    }
+                }
                 0
             }
             WM_COMMAND => {
@@ -1083,7 +1183,7 @@ mod win {
         }
         if id == ID_PV_PANEL {
             let _ = FillRect(hdc, &rect, app.brush_pv_elevated);
-            let topbar_height = 18;
+            let topbar_height = scale_px(18);
             let topbar = RECT {
                 left: rect.left,
                 top: rect.top,
@@ -1091,7 +1191,7 @@ mod win {
                 bottom: rect.top + topbar_height,
             };
             let _ = FillRect(hdc, &topbar, app.brush_toolbar);
-            let rail_width = ((rect.right - rect.left) / 5).clamp(42, 56);
+            let rail_width = ((rect.right - rect.left) / 5).clamp(scale_px(42), scale_px(56));
             let rail = RECT {
                 left: rect.left,
                 top: rect.top + topbar_height,
@@ -1104,10 +1204,10 @@ mod win {
                 hdc,
                 "⬡",
                 RECT {
-                    left: rail.left + 4,
-                    top: rail.top + 18,
-                    right: rail.right - 4,
-                    bottom: rail.top + 58,
+                    left: rail.left + scale_px(4),
+                    top: rail.top + scale_px(18),
+                    right: rail.right - scale_px(4),
+                    bottom: rail.top + scale_px(58),
                 },
                 colorref(TOOLBAR_TEXT),
                 app.font_title,
@@ -1117,10 +1217,10 @@ mod win {
                 hdc,
                 "−  □  ×",
                 RECT {
-                    left: rect.right - 62,
-                    top: rect.top + 1,
-                    right: rect.right - 7,
-                    bottom: rect.top + topbar_height - 1,
+                    left: rect.right - scale_px(62),
+                    top: rect.top + scale_px(1),
+                    right: rect.right - scale_px(7),
+                    bottom: rect.top + topbar_height - scale_px(1),
                 },
                 colorref(TOOLBAR_TEXT),
                 app.font_ui,
@@ -1144,9 +1244,9 @@ mod win {
             if selected {
                 let marker = RECT {
                     left: rect.left,
-                    top: rect.top + 3,
-                    right: rect.left + 3,
-                    bottom: rect.bottom - 3,
+                    top: rect.top + scale_px(3),
+                    right: rect.left + scale_px(3),
+                    bottom: rect.bottom - scale_px(3),
                 };
                 let _ = FillRect(hdc, &marker, app.brush_toolbar);
             }
@@ -1154,10 +1254,10 @@ mod win {
                 hdc,
                 &get_text(item.hwndItem),
                 RECT {
-                    left: rect.left + 12,
-                    top: rect.top + 1,
-                    right: rect.right - 7,
-                    bottom: rect.bottom - 1,
+                    left: rect.left + scale_px(12),
+                    top: rect.top + scale_px(1),
+                    right: rect.right - scale_px(7),
+                    bottom: rect.bottom - scale_px(1),
                 },
                 if selected {
                     app.col_accent
@@ -1190,10 +1290,10 @@ mod win {
                 hdc,
                 &text,
                 RECT {
-                    left: rect.left + 8,
-                    top: rect.top + 2,
-                    right: rect.right - 8,
-                    bottom: rect.bottom - 2,
+                    left: rect.left + scale_px(8),
+                    top: rect.top + scale_px(2),
+                    right: rect.right - scale_px(8),
+                    bottom: rect.bottom - scale_px(2),
                 },
                 color,
                 app.font_bold,
@@ -1230,10 +1330,10 @@ mod win {
                 hdc,
                 STEP_ICONS[step],
                 RECT {
-                    left: rect.left + 8,
-                    top: rect.top + 3,
-                    right: rect.left + 42,
-                    bottom: rect.top + 40,
+                    left: rect.left + scale_px(8),
+                    top: rect.top + scale_px(3),
+                    right: rect.left + scale_px(42),
+                    bottom: rect.top + scale_px(40),
                 },
                 marker_color,
                 app.font_title,
@@ -1243,10 +1343,10 @@ mod win {
                 hdc,
                 &format!("{}.", step + 1),
                 RECT {
-                    left: rect.left + 9,
-                    top: rect.top + 40,
-                    right: rect.left + 24,
-                    bottom: rect.top + 56,
+                    left: rect.left + scale_px(9),
+                    top: rect.top + scale_px(40),
+                    right: rect.left + scale_px(24),
+                    bottom: rect.top + scale_px(56),
                 },
                 app.col_muted,
                 app.font_small,
@@ -1256,10 +1356,10 @@ mod win {
                 hdc,
                 STEP_TITLES[step],
                 RECT {
-                    left: rect.left + 10,
-                    top: rect.top + 58,
-                    right: rect.right - 8,
-                    bottom: rect.top + 78,
+                    left: rect.left + scale_px(10),
+                    top: rect.top + scale_px(58),
+                    right: rect.right - scale_px(8),
+                    bottom: rect.top + scale_px(78),
                 },
                 if disabled {
                     app.col_muted
@@ -1273,10 +1373,10 @@ mod win {
                 hdc,
                 STEP_DESCRIPTIONS[step],
                 RECT {
-                    left: rect.left + 10,
-                    top: rect.top + 82,
-                    right: rect.right - 8,
-                    bottom: rect.bottom - 6,
+                    left: rect.left + scale_px(10),
+                    top: rect.top + scale_px(82),
+                    right: rect.right - scale_px(8),
+                    bottom: rect.bottom - scale_px(6),
                 },
                 app.col_muted,
                 app.font_small,
@@ -1293,10 +1393,10 @@ mod win {
                 hdc,
                 state_marker,
                 RECT {
-                    left: rect.right - 24,
-                    top: rect.top + 5,
-                    right: rect.right - 5,
-                    bottom: rect.top + 24,
+                    left: rect.right - scale_px(24),
+                    top: rect.top + scale_px(5),
+                    right: rect.right - scale_px(5),
+                    bottom: rect.top + scale_px(24),
                 },
                 marker_color,
                 app.font_bold,
@@ -1312,10 +1412,10 @@ mod win {
                 hdc,
                 &get_text(item.hwndItem),
                 RECT {
-                    left: rect.left + 2,
-                    top: rect.top + 1,
-                    right: rect.right - 2,
-                    bottom: rect.bottom - 1,
+                    left: rect.left + scale_px(2),
+                    top: rect.top + scale_px(1),
+                    right: rect.right - scale_px(2),
+                    bottom: rect.bottom - scale_px(1),
                 },
                 app.pv_col_text,
                 app.font_tiny,
@@ -1338,9 +1438,9 @@ mod win {
             if selected {
                 let marker = RECT {
                     left: rect.left,
-                    top: rect.top + 2,
-                    right: rect.left + 3,
-                    bottom: rect.bottom - 2,
+                    top: rect.top + scale_px(2),
+                    right: rect.left + scale_px(3),
+                    bottom: rect.bottom - scale_px(2),
                 };
                 let _ = FillRect(hdc, &marker, app.brush_toolbar);
             }
@@ -1348,10 +1448,10 @@ mod win {
                 hdc,
                 PAGE_TITLES[page],
                 RECT {
-                    left: rect.left + 14,
-                    top: rect.top + 1,
-                    right: rect.right - 6,
-                    bottom: rect.bottom - 1,
+                    left: rect.left + scale_px(14),
+                    top: rect.top + scale_px(1),
+                    right: rect.right - scale_px(6),
+                    bottom: rect.bottom - scale_px(1),
                 },
                 if selected {
                     app.col_accent
@@ -1370,9 +1470,9 @@ mod win {
                 hdc,
                 &text,
                 RECT {
-                    left: rect.left + 6,
+                    left: rect.left + scale_px(6),
                     top: rect.top,
-                    right: rect.right - 4,
+                    right: rect.right - scale_px(4),
                     bottom: rect.bottom,
                 },
                 app.col_accent,
@@ -1401,10 +1501,10 @@ mod win {
                 hdc,
                 EXPERT_PAGES[index].0,
                 RECT {
-                    left: rect.left + 1,
-                    top: rect.top + 1,
-                    right: rect.right - 1,
-                    bottom: rect.bottom - 1,
+                    left: rect.left + scale_px(1),
+                    top: rect.top + scale_px(1),
+                    right: rect.right - scale_px(1),
+                    bottom: rect.bottom - scale_px(1),
                 },
                 if selected {
                     app.col_accent
@@ -1423,10 +1523,10 @@ mod win {
                 hdc,
                 &get_text(item.hwndItem),
                 RECT {
-                    left: rect.left + 2,
-                    top: rect.top + 1,
-                    right: rect.right - 2,
-                    bottom: rect.bottom - 1,
+                    left: rect.left + scale_px(2),
+                    top: rect.top + scale_px(1),
+                    right: rect.right - scale_px(2),
+                    bottom: rect.bottom - scale_px(1),
                 },
                 colorref(TOOLBAR_TEXT),
                 app.font_tiny,
@@ -1446,10 +1546,10 @@ mod win {
             hdc,
             &get_text(item.hwndItem),
             RECT {
-                left: rect.left + 7,
-                top: rect.top + 1,
-                right: rect.right - 7,
-                bottom: rect.bottom - 1,
+                left: rect.left + scale_px(7),
+                top: rect.top + scale_px(1),
+                right: rect.right - scale_px(7),
+                bottom: rect.bottom - scale_px(1),
             },
             if disabled {
                 app.col_muted
@@ -1943,6 +2043,54 @@ mod win {
         set_font(app.c.pv_btn_page, app.font_tiny);
     }
 
+    /// Reapply role-specific fonts after Windows moves the window to a monitor
+    /// with a different DPI. All controls are direct children of the main
+    /// window, so the child walk covers native and owner-drawn controls.
+    unsafe fn apply_control_fonts(app: &App, parent: HWND) {
+        let mut child = GetWindow(parent, GW_CHILD);
+        while !child.is_null() {
+            set_font(child, app.font_ui);
+            child = GetWindow(child, GW_HWNDNEXT);
+        }
+
+        for hwnd in [
+            app.c.toolbar_title,
+            app.c.nav_brand,
+            app.c.nav_hint_title,
+            app.c.lbl_eyebrow,
+            app.c.lbl_build_title,
+            app.c.lbl_expert,
+            app.c.lbl_preview_header,
+            app.c.pv_title,
+        ] {
+            set_font(hwnd, app.font_bold);
+        }
+        for hwnd in app.c.nav_groups.iter().copied() {
+            set_font(hwnd, app.font_bold);
+        }
+        for hwnd in [
+            app.c.nav_hint,
+            app.c.lbl_expert_hint,
+            app.c.lbl_preview_caption,
+            app.c.pv_desktop,
+            app.c.pv_launch,
+            app.c.pv_launch_tray,
+            app.c.pv_login,
+            app.c.pv_login_tray,
+        ] {
+            set_font(hwnd, app.font_small);
+        }
+        set_font(app.c.lbl_center_title, app.font_title);
+        set_font(app.c.pv_body, app.font_tiny);
+        set_font(app.c.pv_btn_cancel, app.font_tiny);
+        set_font(app.c.pv_btn_page, app.font_tiny);
+        for row in app.c.pages.iter().flatten() {
+            if row.kind == ROW_HEADING {
+                set_font(row.label, app.font_bold);
+            }
+        }
+    }
+
     unsafe fn build_pages(app: &mut App, parent: HWND) {
         // Application.
         row_edit(app, parent, EP_APPLICATION, "App name", ID_ED_NAME);
@@ -2292,8 +2440,10 @@ mod win {
     unsafe fn layout(app: &mut App, hwnd: HWND) {
         let mut rc: RECT = std::mem::zeroed();
         let _ = GetClientRect(hwnd, &mut rc);
-        let w = (rc.right - rc.left).max(0);
-        let h = (rc.bottom - rc.top).max(0);
+        // Keep the layout algorithm in 96-DPI logical units. `move_to`
+        // converts every child rectangle back to physical pixels.
+        let w = unscale_px((rc.right - rc.left).max(0));
+        let h = unscale_px((rc.bottom - rc.top).max(0));
         let toolbar_h = if app.home_view { 0 } else { 44 };
         let status_h = if app.home_view { 0 } else { 24 };
         let content_y = toolbar_h;
@@ -3922,6 +4072,24 @@ mod win {
         match build_setup(app) {
             Ok(msg) => set_status(app, &msg),
             Err(e) => set_status(app, &format!("Build failed:\n{e}")),
+        }
+    }
+
+    #[cfg(test)]
+    mod dpi_tests {
+        use super::scale_for_dpi;
+
+        #[test]
+        fn logical_dimensions_scale_to_monitor_dpi() {
+            assert_eq!(scale_for_dpi(100, 96), 100);
+            assert_eq!(scale_for_dpi(100, 144), 150);
+            assert_eq!(scale_for_dpi(100, 192), 200);
+        }
+
+        #[test]
+        fn negative_positions_round_away_from_zero_consistently() {
+            assert_eq!(scale_for_dpi(-100, 144), -150);
+            assert_eq!(scale_for_dpi(-1, 144), -2);
         }
     }
 }
