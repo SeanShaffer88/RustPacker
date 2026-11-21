@@ -6,6 +6,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Silent, scriptable installs.** A packed `Setup.exe` now installs
+  with no windows at all: `Setup.exe --silent [--dir <folder>]` uses the
+  project's defaults (default install folder unless `--dir` overrides
+  it; finish-page checkboxes at their project defaults, including the
+  Desktop shortcut and launch-at-login when offered and defaulted on)
+  and never launches the app afterwards. Unattended means unattended:
+  nothing prompts, and the outcome is the exit code — 0 installed,
+  3 payload/install failure (rolled back), 4 blocked by a pre-flight
+  check or an unusable folder, 5 administrator rights required. This
+  also makes the installer testable end-to-end by automation instead of
+  only by hand.
+
+### Fixed
+
+- **The install log survives fresh installs.** `InstallLog::open` now
+  creates a missing parent folder; the wizard opens the log before the
+  install folder exists, so a first-time install used to end up with no
+  `install.log` at all.
+
 ### Changed
 
 - **Dependency updates (Dependabot).** `toml` 0.8 → 1.2.1 and `zstd`

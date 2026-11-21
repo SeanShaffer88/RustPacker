@@ -44,6 +44,10 @@ or **n/a** in the Result column.
 | B3 | Finish with "Launch after setup exits" ticked | The app starts on Finish (with the tray argument if that sub-option was ticked — verify via the app's behaviour/args) | |
 | B4 | Finish with "Launch at Windows login" ticked | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` gains a quoted `"path" [--tray]` value for the app; signing out/in starts it | |
 | B5 | Click Cancel on the Finish page after a successful install | Asked whether to keep the app; **No** uninstalls it, **Yes** leaves it | |
+| B6 | Run `Setup.exe --silent --dir %TEMP%\RPTest` from a terminal | No window ever appears; exit code 0; the app is installed in `%TEMP%\RPTest` with journal, log and uninstaller | |
+| B7 | Silent install with desktop-shortcut / launch-at-login defaults on | Shortcut and `Run` value are created as defaulted, and the app is **not** launched afterwards | |
+| B8 | Silent install with a prerequisite missing or a checked process running | Exit code 4 and nothing is installed | |
+| B9 | Silent install of a per-machine project from a standard account | Exit code 5; **no** UAC prompt appears; nothing is installed | |
 
 ## C. What the install left behind
 

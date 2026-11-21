@@ -8,6 +8,9 @@
 //!
 //! Modes (also see `--help`):
 //!   * (no arguments)          run the install wizard
+//!   * `--silent [--dir <dir>]` install with no UI at all, using the
+//!     project's defaults (finish-page choices at their defaults; the
+//!     installed app is never launched afterwards)
 //!   * `--uninstall`           uninstall using the journal beside this exe
 //!   * `--uninstall --silent`  uninstall with no UI at all
 //!   * `--help`                show usage in a message box
@@ -41,9 +44,10 @@ fn main() {
 #[cfg(windows)]
 mod imp {
     use rustpacker_core::{
-        extract_payload_with_progress, find_payload, read_manifest, sha256_hex, InstallJournal,
-        InstallLog, InstallScope, JournalAction, PayloadManifest, Prerequisite, ProjectConfig,
-        Typewriter, JOURNAL_FILE_NAME, LOG_FILE_NAME, UNINSTALLER_FILE_NAME,
+        extract_payload_with_progress, find_payload, read_manifest, sha256_hex,
+        validate_install_dir, FinishSelection, InstallJournal, InstallLog, InstallScope,
+        JournalAction, PayloadManifest, Prerequisite, ProjectConfig, Typewriter,
+        JOURNAL_FILE_NAME, LOG_FILE_NAME, UNINSTALLER_FILE_NAME,
     };
     use std::cell::RefCell;
     use std::collections::HashSet;
@@ -1600,6 +1604,150 @@ mod imp {
     /// tampered or copied journal cannot delete files elsewhere. When an
     /// interactive uninstall finds a journal that tries to escape, it
     /// refuses to proceed instead of asking the user to trust it.
+    /// The value of `--dir <folder>` / `--dir=<folder>`, if present.
+    fn dir_argument(args: &[String]) -> Option<String> {
+        let mut iter = args.iter();
+        while let Some(arg) = iter.next() {
+            if arg.eq_ignore_ascii_case("--dir") {
+                return iter.next().cloned();
+            }
+            if arg.len() > 6 && arg[..6].eq_ignore_ascii_case("--dir=") {
+                return Some(arg[6..].to_string());
+            }
+        }
+        None
+    }
+
+    /// Headless install (`--silent` without `--uninstall`): no windows, no
+    /// prompts, and the installed app is never launched afterwards. The
+    /// exit code is the contract a script can test:
+    ///
+    /// * 0 — installed
+    /// * 3 — the payload/config could not be read, or the install failed
+    ///   (everything was rolled back)
+    /// * 4 — a pre-flight check blocks the install, or the target folder
+    ///   is not usable
+    /// * 5 — administrator rights are required but not held (an
+    ///   unattended run cannot answer a UAC prompt)
+    fn run_silent_install(dir_arg: Option<String>) -> i32 {
+        let (cfg, _packed, payload) = match load_config() {
+            Ok(v) => v,
+            Err(_) => return 3,
+        };
+        if preflight_blocker(&cfg).is_some() {
+            return 4;
+        }
+        if !is_elevated()
+            && (cfg.install.require_admin || cfg.install.scope.resolve(true).is_machine_wide())
+        {
+            return 5;
+        }
+        let install_dir = dir_arg.unwrap_or_else(|| default_install_dir(&cfg));
+        if validate_install_dir(&install_dir).is_err() {
+            return 4;
+        }
+
+        // The install folder usually does not exist yet, so the log file
+        // can only be opened after `perform_install` has created it:
+        // buffer the step lines and write them out at the end.
+        let mut lines = vec![format!(
+            "installing {} {} into {install_dir} (silent)",
+            cfg.app.name, cfg.app.version
+        )];
+        let outcome = perform_install(&cfg, &install_dir, payload.as_deref(), |percent, text| {
+            lines.push(format!("{percent}% {text}"));
+        });
+        let mut log = InstallLog::open(&install_log_path(&install_dir))
+            .unwrap_or_else(|_| InstallLog::disabled());
+        for line in &lines {
+            log.note(line);
+        }
+        let mut done = match outcome {
+            Ok(done) => done,
+            Err(e) => {
+                log.error(&e);
+                log.finish("failed");
+                return 3;
+            }
+        };
+
+        // Finish-page choices at the project's defaults, journalled just
+        // like the wizard's Finish button journals them.
+        apply_silent_finish_choices(&cfg, &install_dir, &mut done.journal);
+        let journal_path = PathBuf::from(&install_dir).join(JOURNAL_FILE_NAME);
+        if done.journal.save(&journal_path).is_err() {
+            // Without the journal the shortcuts/Run entries just written
+            // could never be uninstalled; report failure rather than
+            // pretend the install is complete.
+            log.finish("failed");
+            return 3;
+        }
+        log.note(&format!("journal: {}", done.journal.install_dir));
+        log.finish("installed");
+        0
+    }
+
+    /// The finish-page effects of a silent install. Mirrors the wizard's
+    /// Finish button with every checkbox at its project default — except
+    /// "launch after setup", which an unattended run must never do.
+    /// Failures here are non-fatal (as in the wizard): the install itself
+    /// has already succeeded.
+    fn apply_silent_finish_choices(
+        cfg: &ProjectConfig,
+        install_dir: &str,
+        journal: &mut InstallJournal,
+    ) {
+        let model = cfg.finish_model();
+        let defaults = FinishSelection::from_defaults(&cfg.finish);
+        let install_path = PathBuf::from(install_dir);
+        let main_exe = install_path.join(&cfg.app.main_exe);
+
+        if defaults.desktop && model.show_desktop_shortcut && main_exe.is_file() {
+            if let Ok(link) = create_shortcut(
+                &main_exe,
+                &sanitize_folder(&cfg.app.name),
+                &install_path,
+                &cfg.app.name,
+            ) {
+                journal.record(JournalAction::CreateShortcut {
+                    path: link.to_string_lossy().into_owned(),
+                });
+            }
+        }
+
+        // Project-file [[shortcuts]] (beyond the finish-page checkbox).
+        for shortcut in &cfg.shortcuts {
+            if !shortcut.location_is_supported() {
+                continue;
+            }
+            let target = install_path.join(shortcut.target.trim());
+            if !target.is_file() {
+                continue;
+            }
+            if let Ok(link) = create_shortcut_at(
+                shortcut.location.trim(),
+                &target,
+                shortcut.name.trim(),
+                &install_path,
+                &shortcut.arguments,
+            ) {
+                journal.record(JournalAction::CreateShortcut {
+                    path: link.to_string_lossy().into_owned(),
+                });
+            }
+        }
+
+        if defaults.login && model.show_launch_at_login {
+            if let Some(command) =
+                model.login_command(cfg, &main_exe.to_string_lossy(), true, defaults.login_tray)
+            {
+                if reg_set_sz_at(HKEY_CURRENT_USER, RUN_KEY, &cfg.app.app_id, &command).is_ok() {
+                    journal.record_run_entry(&cfg.app.app_id);
+                }
+            }
+        }
+    }
+
     fn run_uninstall(silent: bool) -> i32 {
         let Some(own_exe) = std::env::current_exe().ok() else {
             if !silent {
@@ -2969,6 +3117,9 @@ mod imp {
 
     const USAGE: &str = "RustPacker installer\r\n\r\n\
         (no arguments)\tRun the setup wizard.\r\n\
+        --silent [--dir <folder>]\tInstall without any windows, using the project defaults. \
+        The app is not launched afterwards. Exit code: 0 installed, 3 install failed, \
+        4 blocked by a pre-flight check or an unusable folder, 5 administrator rights required.\r\n\
         --uninstall\tRemove the program using the install journal beside Uninstall.exe.\r\n\
         --uninstall --silent\tUninstall without any windows.\r\n\
         --help\tShow this message.\r\n\r\n\
@@ -2990,6 +3141,12 @@ mod imp {
         let silent = has("--silent") || has("/silent");
         if uninstall_mode {
             return run_uninstall(silent);
+        }
+        if silent {
+            // A silent run must never show a window — including the
+            // elevation prompt below — so it branches off here, before
+            // anything interactive can happen.
+            return run_silent_install(dir_argument(&args));
         }
         // Per-machine installs need elevation: offer a UAC re-launch
         // instead of failing at the first HKLM write. A per-user install
