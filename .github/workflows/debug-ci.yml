@@ -1,0 +1,45 @@
+name: Debug CI
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  debug:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.100.0"
+          targets: x86_64-pc-windows-msvc
+          components: rustfmt, clippy
+      - name: Collect diagnostics
+        shell: bash
+        run: |
+          export RUSTFLAGS="-D warnings"
+          cargo fmt --all -- --check > fmt.txt 2>&1 || true
+          cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc > clippy.txt 2>&1 || true
+          cargo test --workspace > test.txt 2>&1 || true
+          {
+            echo '## fmt'
+            head -200 fmt.txt
+            echo '## clippy errors'
+            grep -E 'error|warning:' -A 8 clippy.txt | head -200 || true
+            echo '## test failures'
+            grep -E 'FAILED|panicked|failures:' -A 6 test.txt | head -120 || true
+            echo '## test tail'
+            tail -5 test.txt
+          } > report.txt 2>&1
+          true
+      - name: Post report
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          head -c 60000 report.txt > body.txt 2>/dev/null || echo '(no report)' > body.txt
+          gh pr comment 20 --body-file body.txt
