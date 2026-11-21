@@ -89,9 +89,9 @@ or **n/a** in the Result column.
 | F6 | Switch between editor pages (Application, Install settings, Shortcuts, …) with unsaved edits | No edit is lost; each page shows its own fields and the centre title/hint updates | |
 | F7 | Add, edit and remove a shortcut, a registry entry, a file association, a prerequisite and a process check; save and reload the project | All entries survive the round-trip in the project file, and Validate flags a deliberately broken entry | |
 | F8 | Collapse navigation groups, hide the navigation and preview panels, resize the window | Layout stays usable down to the minimum size; nothing overlaps or disappears | |
-| F9 | Use the menu bar (File → New/Open/Save, Build → Validate/Build, Help → About) | Same behaviour as the toolbar buttons; About shows the Studio version | |
-| F10 | Open the Studio and look at the overall theme | Cream Gruvbox light surfaces, deep-green toolbar strip, dark readable text everywhere (including edit fields and list boxes); the wizard preview stays dark Gruvbox like a real `Setup.exe` | |
-| F11 | Click each of the four step cards (Package identity, Payload, User experience, Build) | Lands on the matching editor page; the step strip shows ✓ for earlier steps (green), ● for the current step (amber, bold), ○ for later steps; the eyebrow above the title names the current step | |
+| F9 | Use the top actions and panel toggles | New/Open/Save/Validate/Build and both panel toggles work; the native menu row is absent | |
+| F10 | Open the Studio and compare its colors to the reference | Warm-white canvas, pale-green surfaces, forest-green title/toolbar, amber build action, and no default gray buttons; preview has a green rail and light page | |
+| F11 | Click each of the four step cards (Package identity, Payload, User experience, Build) | Lands on the matching editor page; cards show completed/current/upcoming states and the heading names the current task | |
 | F12 | Use the expert-controls strip (Shortcuts, Registry, Associations, Prerequisites, Processes, Theme) | Each button jumps to that advanced page; the strip stays visible at the editor's bottom at the minimum window size and the build log/list rows above it are not covered | |
 
 ## G. Failure honesty

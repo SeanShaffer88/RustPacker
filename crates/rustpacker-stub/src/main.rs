@@ -1,8 +1,8 @@
 //! RustPacker generated-installer stub.
 //!
 //! When the packer appends a payload to this binary it becomes a
-//! self-contained `Setup.exe`: a compact, terminal-styled Win32 wizard
-//! (no sidebar graphic, no outer scrollbars, Per-Monitor DPI V2) that
+//! self-contained `Setup.exe`: a compact Win32 wizard
+//! (no outer scrollbars, Per-Monitor DPI V2) that
 //! extracts the payload, journals every change, copies itself to
 //! `Uninstall.exe`, and registers an Apps & Features entry.
 //!
@@ -105,11 +105,8 @@ mod imp {
     const DEFAULT_CHARSET: u32 = 1;
     const OUT_DEFAULT_PRECIS: u32 = 0;
     const CLIP_DEFAULT_PRECIS: u32 = 0;
-    /// ClearType is what makes the wizard's monospace text look right on LCDs.
+    /// ClearType keeps the wizard text crisp on LCDs.
     const CLEARTYPE_QUALITY: u32 = 5;
-    /// `FF_MODERN | FIXED_PITCH | (VARIABLE_PITCH << 4)` — what GDI calls a
-    /// monospace family. Windows resolves it to the requested face.
-    const FIXED_PITCH_FAMILY: u32 = 49;
 
     // Control IDs.
     const ID_TITLE: i32 = 100;
@@ -3224,7 +3221,7 @@ mod imp {
         };
         let _ = unsafe { windows_sys::Win32::UI::Controls::InitCommonControlsEx(&icex) };
 
-        let face = wide("Cascadia Mono");
+        let face = wide("Segoe UI");
         let (font, title_font, bg_brush, surface_brush) = unsafe {
             (
                 CreateFontW(
@@ -3240,7 +3237,7 @@ mod imp {
                     OUT_DEFAULT_PRECIS,
                     CLIP_DEFAULT_PRECIS,
                     CLEARTYPE_QUALITY,
-                    FIXED_PITCH_FAMILY,
+                    0,
                     pcw(&face),
                 ),
                 CreateFontW(
@@ -3256,7 +3253,7 @@ mod imp {
                     OUT_DEFAULT_PRECIS,
                     CLIP_DEFAULT_PRECIS,
                     CLEARTYPE_QUALITY,
-                    FIXED_PITCH_FAMILY,
+                    0,
                     pcw(&face),
                 ),
                 CreateSolidBrush(bg_color),

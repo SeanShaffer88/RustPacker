@@ -445,7 +445,9 @@ fn example_toml() -> Result<String, String> {
                 out.push_str("# tray.supports_tray is true.\n");
             }
             "[theme]" => {
-                out.push_str("# [theme] - Gruvbox terminal palette for the installer wizard.\n");
+                out.push_str(
+                    "# [theme] - installer colors; defaults match the Studio reference.\n",
+                );
             }
             _ => {}
         }

@@ -1,14 +1,12 @@
 //! RustPacker Builder Studio.
 //!
 //! A pure-Win32 (windows-sys) front end over `rustpacker-core`: edit a
-//! project on the left, watch the compact terminal wizard preview update
-//! live on the right, then pack a `Setup.exe` with the core packer.
+//! project on the left, watch the installer preview update live on the
+//! right, then pack a `Setup.exe` with the core packer.
 //!
-//! The Studio's own chrome uses the Gruvbox light palette (cream
-//! surfaces, deep-green toolbar) with a four-step project flow across
-//! the top of the editor and an expert-controls strip along the bottom;
-//! the wizard preview keeps the project's own terminal theme (Gruvbox
-//! dark by default), so what authors see is what end users get.
+//! The Studio follows the supplied authoring reference: warm-white canvas,
+//! pale-green panels, forest-green chrome, amber actions, and a four-step
+//! flow. The live preview uses the project's own installer theme.
 //!
 //! The studio is Windows-only. On any other platform `main` prints a
 //! clear message and exits non-zero, so host builds still compile.
@@ -41,16 +39,21 @@ mod win {
     use windows_sys::Win32::Foundation::{
         COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM,
     };
+    use windows_sys::Win32::Graphics::Dwm::DwmSetWindowAttribute;
     use windows_sys::Win32::Graphics::Gdi::{
-        CreateFontW, CreateSolidBrush, DeleteObject, SetBkColor, SetTextColor, UpdateWindow,
-        CLEARTYPE_QUALITY, DEFAULT_CHARSET, FW_BOLD, FW_NORMAL, HBRUSH, HDC, HFONT,
+        CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW, FillRect, FrameRect, SelectObject,
+        SetBkColor, SetBkMode, SetTextColor, UpdateWindow, CLEARTYPE_QUALITY, DEFAULT_CHARSET,
+        DT_CENTER, DT_LEFT, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, FW_BOLD, FW_NORMAL, HBRUSH,
+        HDC, HFONT, TRANSPARENT,
     };
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::UI::Controls::Dialogs::{
         GetOpenFileNameW, GetSaveFileNameW, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_HIDEREADONLY,
         OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST, OPENFILENAMEW,
     };
-    use windows_sys::Win32::UI::Controls::{BST_CHECKED, BST_UNCHECKED};
+    use windows_sys::Win32::UI::Controls::{
+        BST_CHECKED, BST_UNCHECKED, DRAWITEMSTRUCT, ODS_DISABLED, ODS_HOTLIGHT, ODS_SELECTED,
+    };
     use windows_sys::Win32::UI::HiDpi::{
         SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     };
@@ -65,13 +68,13 @@ mod win {
         GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, IsDialogMessageW, LoadCursorW,
         LoadIconW, MessageBoxW, MoveWindow, PostQuitMessage, RegisterClassW, SendMessageW,
         SetWindowLongPtrW, SetWindowTextW, ShowWindow, TranslateMessage, BM_GETCHECK, BM_SETCHECK,
-        BN_CLICKED, BS_AUTOCHECKBOX, BS_PUSHBUTTON, CBN_SELCHANGE, CBS_DROPDOWNLIST, CB_ADDSTRING,
+        BN_CLICKED, BS_AUTOCHECKBOX, BS_OWNERDRAW, CBN_SELCHANGE, CBS_DROPDOWNLIST, CB_ADDSTRING,
         CB_GETCURSEL, CB_SETCURSEL, CREATESTRUCTW, CW_USEDEFAULT, EN_CHANGE, ES_AUTOHSCROLL,
         ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY, GWLP_USERDATA, HMENU, IDC_ARROW, MB_ICONERROR,
         MB_OK, MINMAXINFO, MSG, SW_HIDE, SW_SHOW, WM_COMMAND, WM_CREATE, WM_CTLCOLORBTN,
-        WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY, WM_GETMINMAXINFO, WM_NCCREATE, WM_SETFONT,
-        WM_SIZE, WNDCLASSW, WS_BORDER, WS_CHILD, WS_CLIPCHILDREN, WS_OVERLAPPEDWINDOW, WS_TABSTOP,
-        WS_VISIBLE, WS_VSCROLL,
+        WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DRAWITEM, WM_GETMINMAXINFO, WM_NCCREATE,
+        WM_SETFONT, WM_SIZE, WNDCLASSW, WS_BORDER, WS_CHILD, WS_CLIPCHILDREN, WS_OVERLAPPEDWINDOW,
+        WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
     };
 
     // ---- control ids -------------------------------------------------------
@@ -80,6 +83,8 @@ mod win {
     const ID_PANEL_RIGHT: i32 = 1002;
     const ID_PANEL_CENTER: i32 = 1003;
     const ID_STATUSBAR: i32 = 1004;
+    const ID_PANEL_EXPERT: i32 = 1005;
+    const SS_OWNERDRAW_STYLE: u32 = 0x0000_000D;
     const ID_BTN_NEW: i32 = 1009;
     const ID_BTN_LOAD: i32 = 1010;
     const ID_BTN_SAVE: i32 = 1011;
@@ -87,17 +92,6 @@ mod win {
     const ID_BTN_BUILD: i32 = 1013;
     const ID_BTN_TOGGLE_LEFT: i32 = 1014;
     const ID_BTN_TOGGLE_RIGHT: i32 = 1015;
-
-    // Menu commands (also delivered through WM_COMMAND, like buttons).
-    const IDM_NEW: i32 = 2001;
-    const IDM_OPEN: i32 = 2002;
-    const IDM_SAVE: i32 = 2003;
-    const IDM_EXIT: i32 = 2004;
-    const IDM_VALIDATE: i32 = 2011;
-    const IDM_BUILD: i32 = 2012;
-    const IDM_VIEW_NAV: i32 = 2021;
-    const IDM_VIEW_PREVIEW: i32 = 2022;
-    const IDM_ABOUT: i32 = 2031;
 
     // Navigation: group headers at 2100+group, page items at 2200+page.
     const ID_NAV_GROUP: i32 = 2100;
@@ -269,6 +263,12 @@ mod win {
     // land on the page that best represents the step, and the grouped
     // navigation on the left still reaches every page directly.
     const STEP_TITLES: [&str; 4] = ["Package identity", "Payload", "User experience", "Build"];
+    const STEP_DESCRIPTIONS: [&str; 4] = [
+        "Name and details",
+        "Files and install options",
+        "Screens, language, behavior",
+        "Configure and build",
+    ];
     const STEP_PAGES: [usize; 4] = [EP_APPLICATION, EP_PAYLOAD, EP_FINISH, EP_BUILD];
     const STEP_COUNT: usize = 4;
 
@@ -320,7 +320,7 @@ mod win {
         "The installer refuses to continue while one of these programs is running.",
         "Which checkboxes the wizard's finish page offers, and their starting state.",
         "Tray behaviour feeds the finish page: it unlocks the start-minimised and launch-at-login options.",
-        "The installer's terminal palette (#RRGGBB) and typing speed. This themes the wizard, not the Studio.",
+        "The installer's colors (#RRGGBB) and typing speed. These theme the wizard, not the Studio.",
         "Pack the payload into a self-contained Setup.exe. The portable .zip needs no installation.",
     ];
 
@@ -388,29 +388,15 @@ mod win {
         (r as u32) | ((g as u32) << 8) | ((b as u32) << 16)
     }
 
-    /// The Studio chrome's Gruvbox light palette: cream surfaces and
-    /// warm dark text, with the deep-green toolbar the design calls for.
-    /// Expressed as a `TerminalTheme` so `App::new` can keep its single
-    /// theme-driven brush construction; these colours theme the Studio
-    /// only — the wizard preview uses the project's theme instead.
+    /// The Studio palette from the supplied reference design.
     fn studio_theme() -> TerminalTheme {
-        TerminalTheme {
-            background_hex: "#FBF1C7".into(),
-            surface_hex: "#F2E5BC".into(),
-            elevated_surface_hex: "#F9F5D7".into(),
-            border_hex: "#D5C4A1".into(),
-            accent_hex: "#2F5D50".into(),
-            success_hex: "#79740E".into(),
-            warning_hex: "#B57614".into(),
-            info_hex: "#076678".into(),
-            text_hex: "#3C3836".into(),
-            muted_hex: "#7C6F64".into(),
-            cursor_hex: "#B57614".into(),
-        }
+        TerminalTheme::default()
     }
 
-    /// The toolbar strip's deep green (Gruvbox dark aqua/green family).
+    /// Forest-green toolbar and amber primary action from the reference.
     const TOOLBAR_BG: (u8, u8, u8) = (0x24, 0x48, 0x3C);
+    const TOOLBAR_TEXT: (u8, u8, u8) = (0xF7, 0xF7, 0xF2);
+    const WARNING_AMBER: (u8, u8, u8) = (0xD9, 0x9A, 0x21);
 
     fn menu(id: i32) -> HMENU {
         id as isize as HMENU
@@ -471,18 +457,6 @@ mod win {
 
     unsafe fn move_to(hwnd: HWND, x: i32, y: i32, w: i32, h: i32) {
         let _ = MoveWindow(hwnd, x, y, w.max(0), h.max(0), 1);
-    }
-
-    unsafe fn show_info(owner: HWND, text: &str, caption: &str) {
-        use windows_sys::Win32::UI::WindowsAndMessaging::MB_ICONINFORMATION;
-        let text_w = wide(text);
-        let caption_w = wide(caption);
-        let _ = MessageBoxW(
-            owner,
-            text_w.as_ptr(),
-            caption_w.as_ptr(),
-            MB_OK | MB_ICONINFORMATION,
-        );
     }
 
     /// The centre editor has dozens of fields; they are found by control id
@@ -577,10 +551,12 @@ mod win {
 
     struct Ctrls {
         toolbar: HWND,
+        toolbar_title: HWND,
         panel_nav: HWND,
         panel_center: HWND,
         panel_right: HWND,
         statusbar: HWND,
+        expert_panel: HWND,
         btn_new: HWND,
         btn_load: HWND,
         btn_save: HWND,
@@ -608,6 +584,7 @@ mod win {
         by_id: Vec<(i32, HWND)>,
         // right panel
         lbl_preview_header: HWND,
+        lbl_preview_caption: HWND,
         lbl_page: HWND,
         cb_page: HWND,
         pv_panel: HWND,
@@ -625,10 +602,12 @@ mod win {
         fn null() -> Self {
             Self {
                 toolbar: std::ptr::null_mut(),
+                toolbar_title: std::ptr::null_mut(),
                 panel_nav: std::ptr::null_mut(),
                 panel_center: std::ptr::null_mut(),
                 panel_right: std::ptr::null_mut(),
                 statusbar: std::ptr::null_mut(),
+                expert_panel: std::ptr::null_mut(),
                 btn_new: std::ptr::null_mut(),
                 btn_load: std::ptr::null_mut(),
                 btn_save: std::ptr::null_mut(),
@@ -650,6 +629,7 @@ mod win {
                 pages: vec![Vec::new(); PAGE_COUNT],
                 by_id: Vec::new(),
                 lbl_preview_header: std::ptr::null_mut(),
+                lbl_preview_caption: std::ptr::null_mut(),
                 lbl_page: std::ptr::null_mut(),
                 cb_page: std::ptr::null_mut(),
                 pv_panel: std::ptr::null_mut(),
@@ -704,6 +684,8 @@ mod win {
         brush_bg: HBRUSH,
         brush_surface: HBRUSH,
         brush_elevated: HBRUSH,
+        brush_border: HBRUSH,
+        brush_warning: HBRUSH,
         /// The colours `brush_surface`/`brush_elevated` were created from.
         /// `WM_CTLCOLOR*` needs both the brush and a matching `SetBkColor`;
         /// keeping the pair together is what stops the two drifting apart.
@@ -718,8 +700,8 @@ mod win {
         brush_toolbar: HBRUSH,
         bg_toolbar: COLORREF,
         /// The wizard preview's own palette, from the project theme's
-        /// defaults: the Studio is Gruvbox light, but the preview must
-        /// show the wizard as end users will see it (Gruvbox dark).
+        /// defaults: the Studio has a fixed reference palette, while the
+        /// preview uses the project's installer palette.
         brush_pv_surface: HBRUSH,
         brush_pv_elevated: HBRUSH,
         pv_bg_surface: COLORREF,
@@ -743,22 +725,22 @@ mod win {
                     // to a colour nobody chose.
                     TerminalTheme::parse_hex(&TerminalTheme::default().elevated_surface_hex)
                 })
-                .unwrap_or((0xF9, 0xF5, 0xD7));
-            // The preview keeps the project theme's palette (Gruvbox dark
-            // by default) even though the Studio chrome around it is the
-            // light palette — the preview is a picture of the wizard, not
-            // part of the Studio's furniture.
+                .unwrap_or((0xFF, 0xFF, 0xFF));
+            let border_rgb =
+                TerminalTheme::parse_hex(&theme.border_hex).unwrap_or((0xD5, 0xC4, 0xA1));
+            // The preview keeps the project's installer palette so it
+            // stays an honest preview rather than a copy of Studio chrome.
             let wizard = TerminalTheme::default();
             let pv_surface_rgb = wizard.surface_rgb();
             let pv_elevated_rgb = TerminalTheme::parse_hex(&wizard.elevated_surface_hex)
-                .unwrap_or((0x3C, 0x38, 0x36));
+                .unwrap_or((0xFF, 0xFF, 0xFF));
             Self {
                 cfg: ProjectConfig::default(),
                 output_dir: "dist".to_string(),
                 stub_path: String::new(),
                 build_portable: false,
                 project_path: None,
-                page: PAGE_FINISH,
+                page: PAGE_WELCOME,
                 editor_page: EP_APPLICATION,
                 nav_collapsed: [false; GROUP_COUNT],
                 list_sel: [-1; LIST_KINDS],
@@ -781,6 +763,8 @@ mod win {
                 brush_bg: std::ptr::null_mut(),
                 brush_surface: unsafe { CreateSolidBrush(colorref(surface_rgb)) },
                 brush_elevated: unsafe { CreateSolidBrush(colorref(elevated_rgb)) },
+                brush_border: unsafe { CreateSolidBrush(colorref(border_rgb)) },
+                brush_warning: unsafe { CreateSolidBrush(colorref(WARNING_AMBER)) },
                 bg_surface: colorref(surface_rgb),
                 bg_elevated: colorref(elevated_rgb),
                 bg_window: colorref(theme.background_rgb()),
@@ -808,6 +792,8 @@ mod win {
                 let _ = DeleteObject(self.font_title);
                 let _ = DeleteObject(self.brush_surface);
                 let _ = DeleteObject(self.brush_elevated);
+                let _ = DeleteObject(self.brush_border);
+                let _ = DeleteObject(self.brush_warning);
                 let _ = DeleteObject(self.brush_toolbar);
                 let _ = DeleteObject(self.brush_pv_surface);
                 let _ = DeleteObject(self.brush_pv_elevated);
@@ -844,8 +830,29 @@ mod win {
     unsafe fn make_fonts() -> (HFONT, HFONT, HFONT) {
         let ui = make_font("Segoe UI", -16, false);
         let mono = make_font("Cascadia Mono", -15, false);
-        let title = make_font("Cascadia Mono", -18, true);
+        let title = make_font("Segoe UI", -30, true);
         (ui, mono, title)
+    }
+
+    /// Tint the native Windows title bar to match the Studio toolbar.
+    /// DWM ignores these attributes on unsupported Windows versions.
+    unsafe fn set_caption_theme(hwnd: HWND) {
+        const DWMWA_CAPTION_COLOR: u32 = 35;
+        const DWMWA_TEXT_COLOR: u32 = 36;
+        let caption = colorref(TOOLBAR_BG);
+        let text = colorref(TOOLBAR_TEXT);
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_CAPTION_COLOR,
+            &caption as *const _ as *const core::ffi::c_void,
+            std::mem::size_of_val(&caption) as u32,
+        );
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_TEXT_COLOR,
+            &text as *const _ as *const core::ffi::c_void,
+            std::mem::size_of_val(&text) as u32,
+        );
     }
 
     // ---- entry point ---------------------------------------------------------
@@ -884,7 +891,7 @@ mod win {
             app.brush_bg = brush_bg;
             let app_ptr = Box::into_raw(app);
 
-            let title = wide("RustPacker Builder Studio");
+            let title = wide("Installer Authoring");
             let hwnd = CreateWindowExW(
                 0,
                 class_name.as_ptr(),
@@ -906,6 +913,7 @@ mod win {
                 );
                 return;
             }
+            set_caption_theme(hwnd);
             let _ = ShowWindow(hwnd, SW_SHOW);
             let _ = UpdateWindow(hwnd);
 
@@ -950,7 +958,7 @@ mod win {
                     create_controls(app, hwnd);
                     layout(app, hwnd);
                     apply_config_to_ui(app);
-                    set_text(app.c.lbl_center_title, PAGE_TITLES[app.editor_page]);
+                    set_text(app.c.lbl_center_title, "Create your installer");
                     set_text(app.c.lbl_center_hint, PAGE_HINTS[app.editor_page]);
                     refresh_preview(app);
                     set_status(
@@ -979,6 +987,13 @@ mod win {
                 }
                 0
             }
+            WM_DRAWITEM => {
+                if let Some(app) = app_ref(hwnd) {
+                    draw_owner_item(app, &*(lparam as *const DRAWITEMSTRUCT))
+                } else {
+                    0
+                }
+            }
             WM_CTLCOLORSTATIC | WM_CTLCOLORBTN => {
                 if let Some(app) = app_ref(hwnd) {
                     color_control(app, lparam as HWND, wparam as HDC, false)
@@ -1004,6 +1019,310 @@ mod win {
             }
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),
         }
+    }
+
+    unsafe fn draw_item_text(
+        hdc: HDC,
+        text: &str,
+        mut rect: RECT,
+        color: COLORREF,
+        font: HFONT,
+        flags: u32,
+    ) {
+        let previous_font = SelectObject(hdc, font as _);
+        let _ = SetTextColor(hdc, color);
+        let _ = SetBkMode(hdc, TRANSPARENT as i32);
+        let text = wide(text);
+        let _ = DrawTextW(hdc, text.as_ptr(), -1, &mut rect, flags);
+        let _ = SelectObject(hdc, previous_font);
+    }
+
+    /// Paint Studio buttons ourselves. Standard BUTTON controls ignore most
+    /// of the reference colors on modern Windows themes, which caused the gray
+    /// controls visible in the user's screenshot.
+    unsafe fn draw_owner_item(app: &App, item: &DRAWITEMSTRUCT) -> LRESULT {
+        let id = item.CtlID as i32;
+        let hdc = item.hDC;
+        let rect = item.rcItem;
+
+        if id == ID_PANEL_EXPERT {
+            let _ = FillRect(hdc, &rect, app.brush_surface);
+            let _ = FrameRect(hdc, &rect, app.brush_border);
+            return 1;
+        }
+        if id == ID_PV_PANEL {
+            let _ = FillRect(hdc, &rect, app.brush_pv_elevated);
+            let rail_width = ((rect.right - rect.left) / 5).clamp(42, 64);
+            let rail = RECT {
+                left: rect.left,
+                top: rect.top,
+                right: rect.left + rail_width,
+                bottom: rect.bottom,
+            };
+            let _ = FillRect(hdc, &rail, app.brush_toolbar);
+            let _ = FrameRect(hdc, &rect, app.brush_border);
+            draw_item_text(
+                hdc,
+                "◇",
+                RECT {
+                    left: rail.left + 4,
+                    top: rail.top + 16,
+                    right: rail.right - 4,
+                    bottom: rail.top + 56,
+                },
+                colorref(TOOLBAR_TEXT),
+                app.font_title,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            );
+            return 1;
+        }
+
+        let disabled = item.itemState & ODS_DISABLED != 0;
+        let pressed = item.itemState & ODS_SELECTED != 0;
+        let hot = item.itemState & ODS_HOTLIGHT != 0;
+
+        if (ID_BTN_NEW..=ID_BTN_TOGGLE_RIGHT).contains(&id) {
+            let _ = FillRect(hdc, &rect, app.brush_toolbar);
+            let (background, color) = if id == ID_BTN_BUILD {
+                (app.brush_warning, colorref((0x28, 0x28, 0x28)))
+            } else {
+                (app.brush_toolbar, colorref(TOOLBAR_TEXT))
+            };
+            if id == ID_BTN_BUILD || pressed || hot {
+                let _ = FillRect(hdc, &rect, background);
+            }
+            let text = get_text(item.hwndItem);
+            let color = if disabled { app.col_muted } else { color };
+            draw_item_text(
+                hdc,
+                &text,
+                RECT {
+                    left: rect.left + 8,
+                    top: rect.top + 2,
+                    right: rect.right - 8,
+                    bottom: rect.bottom - 2,
+                },
+                color,
+                app.font_bold,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            );
+            return 1;
+        }
+
+        if (ID_STEP_BTN..ID_STEP_BTN + STEP_COUNT as i32).contains(&id) {
+            let step = (id - ID_STEP_BTN) as usize;
+            let current = step_for_page(app.editor_page);
+            let background = if step == current || pressed {
+                app.brush_elevated
+            } else {
+                app.brush_surface
+            };
+            let border = if step == current {
+                app.brush_warning
+            } else if step < current {
+                app.brush_toolbar
+            } else {
+                app.brush_border
+            };
+            let _ = FillRect(hdc, &rect, background);
+            let _ = FrameRect(hdc, &rect, border);
+            let marker_color = if step < current {
+                colorref((0x4F, 0x83, 0x67))
+            } else if step == current {
+                colorref(WARNING_AMBER)
+            } else {
+                app.col_muted
+            };
+            let marker = if step < current {
+                "✓"
+            } else if step == current {
+                "●"
+            } else {
+                "○"
+            };
+            draw_item_text(
+                hdc,
+                marker,
+                RECT {
+                    left: rect.left + 8,
+                    top: rect.top + 7,
+                    right: rect.left + 31,
+                    bottom: rect.top + 29,
+                },
+                marker_color,
+                app.font_bold,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            );
+            draw_item_text(
+                hdc,
+                STEP_TITLES[step],
+                RECT {
+                    left: rect.left + 34,
+                    top: rect.top + 7,
+                    right: rect.right - 8,
+                    bottom: rect.top + 29,
+                },
+                if disabled {
+                    app.col_muted
+                } else {
+                    app.col_text
+                },
+                app.font_bold,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+            );
+            draw_item_text(
+                hdc,
+                STEP_DESCRIPTIONS[step],
+                RECT {
+                    left: rect.left + 34,
+                    top: rect.top + 32,
+                    right: rect.right - 8,
+                    bottom: rect.bottom - 6,
+                },
+                app.col_muted,
+                app.font_ui,
+                DT_LEFT | DT_WORDBREAK,
+            );
+            return 1;
+        }
+
+        if (ID_NAV_ITEM..ID_NAV_ITEM + PAGE_COUNT as i32).contains(&id) {
+            let page = (id - ID_NAV_ITEM) as usize;
+            let selected = page == app.editor_page;
+            let _ = FillRect(
+                hdc,
+                &rect,
+                if selected {
+                    app.brush_elevated
+                } else {
+                    app.brush_surface
+                },
+            );
+            if selected {
+                let marker = RECT {
+                    left: rect.left,
+                    top: rect.top + 2,
+                    right: rect.left + 3,
+                    bottom: rect.bottom - 2,
+                };
+                let _ = FillRect(hdc, &marker, app.brush_toolbar);
+            }
+            draw_item_text(
+                hdc,
+                PAGE_TITLES[page],
+                RECT {
+                    left: rect.left + 14,
+                    top: rect.top + 1,
+                    right: rect.right - 6,
+                    bottom: rect.bottom - 1,
+                },
+                if selected {
+                    app.col_accent
+                } else {
+                    app.col_text
+                },
+                if selected { app.font_bold } else { app.font_ui },
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+            );
+            return 1;
+        }
+
+        if (ID_NAV_GROUP..ID_NAV_GROUP + GROUP_COUNT as i32).contains(&id) {
+            let text = get_text(item.hwndItem);
+            draw_item_text(
+                hdc,
+                &text,
+                RECT {
+                    left: rect.left + 6,
+                    top: rect.top,
+                    right: rect.right - 4,
+                    bottom: rect.bottom,
+                },
+                app.col_accent,
+                app.font_bold,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+            );
+            return 1;
+        }
+
+        if (ID_EXPERT_BTN..ID_EXPERT_BTN + EXPERT_PAGES.len() as i32).contains(&id) {
+            let index = (id - ID_EXPERT_BTN) as usize;
+            let selected = EXPERT_PAGES[index].1 == app.editor_page;
+            let _ = FillRect(
+                hdc,
+                &rect,
+                if selected {
+                    app.brush_elevated
+                } else {
+                    app.brush_surface
+                },
+            );
+            if selected {
+                let _ = FrameRect(hdc, &rect, app.brush_border);
+            }
+            draw_item_text(
+                hdc,
+                EXPERT_PAGES[index].0,
+                RECT {
+                    left: rect.left + 3,
+                    top: rect.top + 1,
+                    right: rect.right - 3,
+                    bottom: rect.bottom - 1,
+                },
+                if selected {
+                    app.col_accent
+                } else {
+                    app.col_muted
+                },
+                if selected { app.font_bold } else { app.font_ui },
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            );
+            return 1;
+        }
+
+        if id == ID_PV_BTN_PAGE {
+            let _ = FillRect(hdc, &rect, app.brush_toolbar);
+            draw_item_text(
+                hdc,
+                &get_text(item.hwndItem),
+                RECT {
+                    left: rect.left + 6,
+                    top: rect.top + 1,
+                    right: rect.right - 6,
+                    bottom: rect.bottom - 1,
+                },
+                colorref(TOOLBAR_TEXT),
+                app.font_bold,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            );
+            return 1;
+        }
+
+        let fill = if pressed || hot {
+            app.brush_surface
+        } else {
+            app.brush_elevated
+        };
+        let _ = FillRect(hdc, &rect, fill);
+        let _ = FrameRect(hdc, &rect, app.brush_border);
+        draw_item_text(
+            hdc,
+            &get_text(item.hwndItem),
+            RECT {
+                left: rect.left + 7,
+                top: rect.top + 1,
+                right: rect.right - 7,
+                bottom: rect.bottom - 1,
+            },
+            if disabled {
+                app.col_muted
+            } else {
+                app.col_text
+            },
+            app.font_ui,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+        );
+        1
     }
 
     /// Pick text/background colours for a child control by identity.
@@ -1037,31 +1356,30 @@ mod win {
             let _ = SetBkColor(hdc, app.pv_bg_elevated);
             return app.brush_pv_elevated as LRESULT;
         }
-        if ctrl == c.toolbar {
-            // The deep-green title strip.
-            let _ = SetTextColor(hdc, app.pv_col_text);
+        if ctrl == c.toolbar || ctrl == c.toolbar_title {
+            let _ = SetTextColor(hdc, colorref(TOOLBAR_TEXT));
             let _ = SetBkColor(hdc, app.bg_toolbar);
             return app.brush_toolbar as LRESULT;
         }
-        // Step-strip buttons carry their state in their text colour:
-        // completed steps green, the current step amber, the rest muted.
-        if let Some(step) = c.step_btns.iter().position(|&b| b == ctrl) {
-            let current = step_for_page(app.editor_page);
-            let col = if step < current {
-                colorref((0x79, 0x74, 0x0E)) // Gruvbox green (light)
-            } else if step == current {
-                colorref((0xB5, 0x76, 0x14)) // Gruvbox yellow (light)
-            } else {
-                app.col_muted
-            };
-            let _ = SetTextColor(hdc, col);
+        if ctrl == c.panel_nav {
+            let _ = SetTextColor(hdc, app.col_text);
             let _ = SetBkColor(hdc, app.bg_surface);
             return app.brush_surface as LRESULT;
         }
-        if ctrl == c.statusbar || ctrl == c.lbl_center_hint {
+        if ctrl == c.panel_center || ctrl == c.panel_right {
+            let _ = SetTextColor(hdc, app.col_text);
+            let _ = SetBkColor(hdc, app.bg_window);
+            return app.brush_bg as LRESULT;
+        }
+        if ctrl == c.statusbar || ctrl == c.lbl_center_hint || ctrl == c.lbl_preview_caption {
             let _ = SetTextColor(hdc, app.col_muted);
             let _ = SetBkColor(hdc, app.bg_window);
             return app.brush_bg as LRESULT;
+        }
+        if ctrl == c.nav_hint {
+            let _ = SetTextColor(hdc, app.col_muted);
+            let _ = SetBkColor(hdc, app.bg_surface);
+            return app.brush_surface as LRESULT;
         }
         if is_edit {
             let _ = SetTextColor(hdc, app.col_text);
@@ -1069,7 +1387,11 @@ mod win {
             return app.brush_elevated as LRESULT;
         }
         // Labels, panels and checkboxes sit on the surface colour.
-        if ctrl == c.lbl_center_title || ctrl == c.lbl_eyebrow || ctrl == c.lbl_preview_header {
+        if ctrl == c.lbl_center_title
+            || ctrl == c.lbl_eyebrow
+            || ctrl == c.lbl_preview_header
+            || ctrl == c.nav_hint_title
+        {
             let _ = SetTextColor(hdc, app.col_accent);
         } else {
             let _ = SetTextColor(hdc, app.col_text);
@@ -1114,14 +1436,7 @@ mod win {
                 (ES_MULTILINE as u32) | (ES_READONLY as u32) | (ES_AUTOVSCROLL as u32) | WS_VSCROLL;
         }
         let h = mk(app, parent, "EDIT", "", style, 0, id);
-        set_font(
-            h,
-            if multiline_readonly && id == ID_PV_BODY {
-                app.font_mono
-            } else {
-                app.font_ui
-            },
-        );
+        set_font(h, app.font_ui);
         h
     }
 
@@ -1131,7 +1446,7 @@ mod win {
             parent,
             "BUTTON",
             text,
-            WS_TABSTOP | (BS_PUSHBUTTON as u32),
+            WS_TABSTOP | (BS_OWNERDRAW as u32),
             0,
             id,
         );
@@ -1307,41 +1622,6 @@ mod win {
         }
     }
 
-    unsafe fn create_menu_bar(parent: HWND) {
-        use windows_sys::Win32::UI::WindowsAndMessaging::{
-            AppendMenuW, CreateMenu, CreatePopupMenu, SetMenu, MF_POPUP, MF_SEPARATOR, MF_STRING,
-        };
-        type HMenu = windows_sys::Win32::UI::WindowsAndMessaging::HMENU;
-        let bar = CreateMenu();
-        let add = |m: HMenu, id: i32, text: &str| {
-            let w = wide(text);
-            let _ = AppendMenuW(m, MF_STRING, id as usize, w.as_ptr());
-        };
-        let popup = |m: HMenu, text: &str| {
-            let w = wide(text);
-            let _ = AppendMenuW(bar, MF_POPUP, m as usize, w.as_ptr());
-        };
-        let file = CreatePopupMenu();
-        add(file, IDM_NEW, "New project");
-        add(file, IDM_OPEN, "Open project...");
-        add(file, IDM_SAVE, "Save project...");
-        let _ = AppendMenuW(file, MF_SEPARATOR, 0, std::ptr::null());
-        add(file, IDM_EXIT, "Exit");
-        popup(file, "File");
-        let build = CreatePopupMenu();
-        add(build, IDM_VALIDATE, "Validate project");
-        add(build, IDM_BUILD, "Build Setup.exe");
-        popup(build, "Build");
-        let view = CreatePopupMenu();
-        add(view, IDM_VIEW_NAV, "Navigation panel");
-        add(view, IDM_VIEW_PREVIEW, "Live preview");
-        popup(view, "View");
-        let help = CreatePopupMenu();
-        add(help, IDM_ABOUT, "About RustPacker Studio...");
-        popup(help, "Help");
-        let _ = SetMenu(parent, bar);
-    }
-
     unsafe fn create_controls(app: &mut App, parent: HWND) {
         // Backgrounds first (bottom of the z-order): toolbar strip, the
         // three panels, the status bar, and the preview panel.
@@ -1350,7 +1630,24 @@ mod win {
         app.c.panel_center = mk(app, parent, "STATIC", "", 0, 0, ID_PANEL_CENTER);
         app.c.panel_right = mk(app, parent, "STATIC", "", 0, 0, ID_PANEL_RIGHT);
         app.c.statusbar = mk(app, parent, "STATIC", "", 0, 0, ID_STATUSBAR);
-        app.c.pv_panel = mk(app, parent, "STATIC", "", 0, 0, ID_PV_PANEL);
+        app.c.expert_panel = mk(
+            app,
+            parent,
+            "STATIC",
+            "",
+            SS_OWNERDRAW_STYLE,
+            0,
+            ID_PANEL_EXPERT,
+        );
+        app.c.pv_panel = mk(
+            app,
+            parent,
+            "STATIC",
+            "",
+            SS_OWNERDRAW_STYLE,
+            0,
+            ID_PV_PANEL,
+        );
 
         // Combos next: their drop-down rectangle overlaps controls below
         // them, so they stay low in the z-order.
@@ -1381,6 +1678,8 @@ mod win {
         app.c.btn_build = mk_button(app, parent, "Build Setup.exe", ID_BTN_BUILD);
         app.c.btn_toggle_left = mk_button(app, parent, "Hide navigation", ID_BTN_TOGGLE_LEFT);
         app.c.btn_toggle_right = mk_button(app, parent, "Hide preview", ID_BTN_TOGGLE_RIGHT);
+        app.c.toolbar_title = mk_label(app, parent, "RustPacker Studio", 0);
+        set_font(app.c.toolbar_title, app.font_bold);
 
         // Navigation: group headers collapse/expand; items switch pages.
         for (gi, (name, _)) in GROUPS.iter().enumerate() {
@@ -1395,7 +1694,7 @@ mod win {
 
         // Sidebar brand and the get-started hint pinned to its bottom.
         app.c.nav_brand = mk_label(app, parent, "RustPacker Studio", 0);
-        set_font(app.c.nav_brand, app.font_title);
+        set_font(app.c.nav_brand, app.font_bold);
         app.c.nav_hint_title = mk_label(app, parent, "Get started", 0);
         set_font(app.c.nav_hint_title, app.font_bold);
         app.c.nav_hint = mk_label(
@@ -1430,14 +1729,18 @@ mod win {
         }
 
         build_pages(app, parent);
-        create_menu_bar(parent);
-
         // Right panel: preview header, page selector + live preview.
         app.c.lbl_preview_header = mk_label(app, parent, "INSTALLER PREVIEW", 0);
         set_font(app.c.lbl_preview_header, app.font_bold);
+        app.c.lbl_preview_caption = mk_label(
+            app,
+            parent,
+            "This is how your installer will look to end users. The preview updates as you configure each step.",
+            0,
+        );
         app.c.lbl_page = mk_label(app, parent, "Wizard page:", 0);
         app.c.pv_title = mk_label(app, parent, "", ID_PV_TITLE);
-        set_font(app.c.pv_title, app.font_title);
+        set_font(app.c.pv_title, app.font_bold);
         app.c.pv_body = mk_edit(app, parent, ID_PV_BODY, true);
         app.c.pv_desktop = mk_check(
             app,
@@ -1765,7 +2068,7 @@ mod win {
             ID_ED_TYPEWRITER,
         );
         {
-            let b = mk_button(app, parent, "Reset to Gruvbox", ID_BTN_THEME_RESET);
+            let b = mk_button(app, parent, "Reset to reference theme", ID_BTN_THEME_RESET);
             reg(app, ID_BTN_THEME_RESET, b);
             app.c.pages[EP_THEME].push(Row::new(
                 std::ptr::null_mut(),
@@ -1834,11 +2137,12 @@ mod win {
         let gap = 4;
 
         move_to(app.c.toolbar, 0, 0, w, toolbar_h);
-        move_to(app.c.btn_new, 8, 8, 70, 28);
-        move_to(app.c.btn_load, 84, 8, 84, 28);
-        move_to(app.c.btn_save, 174, 8, 84, 28);
-        move_to(app.c.btn_validate, 264, 8, 92, 28);
-        move_to(app.c.btn_build, 362, 8, 132, 28);
+        move_to(app.c.toolbar_title, 12, 8, 162, 28);
+        move_to(app.c.btn_new, 180, 8, 60, 28);
+        move_to(app.c.btn_load, 246, 8, 70, 28);
+        move_to(app.c.btn_save, 322, 8, 70, 28);
+        move_to(app.c.btn_validate, 398, 8, 82, 28);
+        move_to(app.c.btn_build, 486, 8, 130, 28);
         move_to(app.c.btn_toggle_right, w - 126, 8, 118, 28);
         move_to(app.c.btn_toggle_left, w - 268, 8, 136, 28);
 
@@ -1896,10 +2200,10 @@ mod win {
         for page in 0..PAGE_COUNT {
             let btn = app.c.nav_items[page];
             if page == app.editor_page {
-                set_text(btn, &format!(">  {}", PAGE_TITLES[page]));
+                set_text(btn, PAGE_TITLES[page]);
                 set_font(btn, app.font_bold);
             } else {
-                set_text(btn, &format!("    {}", PAGE_TITLES[page]));
+                set_text(btn, PAGE_TITLES[page]);
                 set_font(btn, app.font_ui);
             }
         }
@@ -1957,24 +2261,23 @@ mod win {
             sync_config_from_ui(app);
             app.editor_page = page;
         }
-        set_text(app.c.lbl_center_title, PAGE_TITLES[app.editor_page]);
+        set_text(
+            app.c.lbl_center_title,
+            if step_for_page(app.editor_page) == 3 {
+                "Build your installer"
+            } else {
+                "Create your installer"
+            },
+        );
         set_text(app.c.lbl_center_hint, PAGE_HINTS[app.editor_page]);
         layout(app, hwnd);
     }
 
-    /// Refresh the step strip: captions carry the step number and state
-    /// (✓ done, ● current, ○ upcoming); the current step is bold.
+    /// Refresh the step strip captions; owner-draw supplies state and detail.
     unsafe fn refresh_steps(app: &mut App) {
         let current = step_for_page(app.editor_page);
         for (step, btn) in app.c.step_btns.clone().iter().enumerate() {
-            let mark = if step < current {
-                "✓"
-            } else if step == current {
-                "●"
-            } else {
-                "○"
-            };
-            set_text(*btn, &format!("{mark} {}. {}", step + 1, STEP_TITLES[step]));
+            set_text(*btn, STEP_TITLES[step]);
             set_font(
                 *btn,
                 if step == current {
@@ -2012,6 +2315,7 @@ mod win {
             show(app.c.lbl_center_title, false);
             show(app.c.lbl_center_hint, false);
             show(app.c.lbl_expert, false);
+            show(app.c.expert_panel, false);
             for b in app.c.step_btns.clone() {
                 show(b, false);
             }
@@ -2029,9 +2333,9 @@ mod win {
         show(app.c.lbl_eyebrow, true);
         show(app.c.lbl_center_title, true);
         show(app.c.lbl_center_hint, true);
-        move_to(app.c.lbl_eyebrow, g.x + 16, g.y + 10, g.w - 32, 16);
-        move_to(app.c.lbl_center_title, g.x + 16, g.y + 28, g.w - 32, 26);
-        move_to(app.c.lbl_center_hint, g.x + 16, g.y + 58, g.w - 32, 20);
+        move_to(app.c.lbl_eyebrow, g.x + 16, g.y + 8, g.w - 32, 18);
+        move_to(app.c.lbl_center_title, g.x + 16, g.y + 28, g.w - 32, 36);
+        move_to(app.c.lbl_center_hint, g.x + 16, g.y + 66, g.w - 32, 20);
 
         // Step strip: four equal cards across the editor width.
         let strip_w = (g.w - 32 - (STEP_COUNT as i32 - 1) * 8).max(40);
@@ -2041,9 +2345,9 @@ mod win {
             move_to(
                 *btn,
                 g.x + 16 + step as i32 * (step_w + 8),
-                g.y + 84,
+                g.y + 92,
                 step_w,
-                38,
+                82,
             );
         }
 
@@ -2062,8 +2366,8 @@ mod win {
         let w = (g.w - 32).max(60);
         // The expert-controls strip owns the bottom 42px of the editor.
         let expert_y = g.y + g.h - 42;
-        let bottom = expert_y - 10;
-        let mut y = g.y + 134;
+        let bottom = expert_y - 14;
+        let mut y = g.y + 184;
         for row in &current {
             let height = if row.fill {
                 (bottom - y).max(40)
@@ -2108,8 +2412,10 @@ mod win {
         }
 
         // Expert-controls strip along the bottom of the editor.
+        show(app.c.expert_panel, true);
+        move_to(app.c.expert_panel, x - 6, expert_y - 4, w + 12, 38);
         show(app.c.lbl_expert, true);
-        move_to(app.c.lbl_expert, x, expert_y + 6, 104, 20);
+        move_to(app.c.lbl_expert, x + 6, expert_y + 5, 100, 20);
         let expert_x = x + 110;
         let expert_total = (w - 110).max(60);
         let btn_w = (expert_total - 5 * 6) / 6;
@@ -2123,6 +2429,7 @@ mod win {
         let g = app.geom_right;
         let right_hwnds = [
             app.c.lbl_preview_header,
+            app.c.lbl_preview_caption,
             app.c.lbl_page,
             app.c.cb_page,
             app.c.pv_panel,
@@ -2143,20 +2450,29 @@ mod win {
             return;
         }
         show(app.c.lbl_preview_header, true);
+        show(app.c.lbl_preview_caption, true);
         show(app.c.lbl_page, true);
         show(app.c.cb_page, true);
         show(app.c.pv_panel, true);
         move_to(app.c.lbl_preview_header, g.x + 12, g.y + 10, g.w - 24, 20);
         move_to(app.c.lbl_page, g.x + 12, g.y + 37, 92, 20);
         move_to(app.c.cb_page, g.x + 108, g.y + 34, 176, 110);
+        let preview_h = (g.h - 184).clamp(180, 260);
         app.geom_pv = Rect {
             x: g.x + 10,
             y: g.y + 66,
             w: (g.w - 20).max(0),
-            h: (g.h - 76).max(0),
+            h: preview_h,
         };
         let pv = app.geom_pv;
         move_to(app.c.pv_panel, pv.x, pv.y, pv.w, pv.h);
+        move_to(
+            app.c.lbl_preview_caption,
+            pv.x + 2,
+            pv.y + pv.h + 12,
+            pv.w - 4,
+            52,
+        );
         position_preview_children(app);
     }
 
@@ -2184,7 +2500,9 @@ mod win {
             }
             return;
         }
-        move_to(app.c.pv_title, pv.x + 14, pv.y + 12, pv.w - 28, 26);
+        let content_x = pv.x + 64;
+        let content_w = (pv.w - 76).max(40);
+        move_to(app.c.pv_title, content_x, pv.y + 12, content_w, 26);
         move_to(
             app.c.pv_btn_page,
             pv.x + pv.w - 134,
@@ -2196,7 +2514,7 @@ mod win {
         let visible_count = boxes.iter().filter(|(_, vis, _)| on_finish && *vis).count() as i32;
         let stack_h = visible_count * 26;
         let body_h = (pv.h - 46 - 42 - stack_h - 18).max(50);
-        move_to(app.c.pv_body, pv.x + 14, pv.y + 46, pv.w - 28, body_h);
+        move_to(app.c.pv_body, content_x, pv.y + 46, content_w, body_h);
 
         let mut y = pv.y + 46 + body_h + 10;
         for (h, vis, indent) in boxes {
@@ -2912,7 +3230,7 @@ mod win {
     }
 
     unsafe fn handle_command(app: &mut App, hwnd: HWND, wparam: WPARAM) {
-        use windows_sys::Win32::UI::WindowsAndMessaging::{DestroyWindow, LBN_SELCHANGE};
+        use windows_sys::Win32::UI::WindowsAndMessaging::LBN_SELCHANGE;
         let id = (wparam & 0xFFFF) as i32;
         let code = ((wparam >> 16) & 0xFFFF) as u32;
         if app.refreshing {
@@ -2957,29 +3275,14 @@ mod win {
         if code != BN_CLICKED {
             return;
         }
-        // Menu commands arrive with notification code 0 too, so they share
-        // the button arms below.
         match id {
-            ID_BTN_NEW | IDM_NEW => do_new(app),
-            ID_BTN_LOAD | IDM_OPEN => do_load(app, hwnd),
-            ID_BTN_SAVE | IDM_SAVE => do_save(app, hwnd),
-            ID_BTN_VALIDATE | ID_BTN_VALIDATE2 | IDM_VALIDATE => do_validate(app),
-            ID_BTN_BUILD | ID_BTN_BUILD2 | IDM_BUILD => do_build(app),
-            IDM_EXIT => {
-                let _ = DestroyWindow(hwnd);
-            }
-            IDM_ABOUT => show_info(
-                hwnd,
-                &format!(
-                    "RustPacker Builder Studio {}\n\nAuthor RustPacker projects in the \
-                     navigation on the left, watch the installer wizard preview on the \
-                     right, and build a self-contained Setup.exe.",
-                    env!("CARGO_PKG_VERSION")
-                ),
-                "About RustPacker Studio",
-            ),
-            ID_BTN_TOGGLE_LEFT | IDM_VIEW_NAV => toggle_nav(app, hwnd),
-            ID_BTN_TOGGLE_RIGHT | IDM_VIEW_PREVIEW => toggle_preview(app, hwnd),
+            ID_BTN_NEW => do_new(app),
+            ID_BTN_LOAD => do_load(app, hwnd),
+            ID_BTN_SAVE => do_save(app, hwnd),
+            ID_BTN_VALIDATE | ID_BTN_VALIDATE2 => do_validate(app),
+            ID_BTN_BUILD | ID_BTN_BUILD2 => do_build(app),
+            ID_BTN_TOGGLE_LEFT => toggle_nav(app, hwnd),
+            ID_BTN_TOGGLE_RIGHT => toggle_preview(app, hwnd),
             ID_BTN_BROWSE_STUB => {
                 if let Some(path) = file_dialog(
                     hwnd,
@@ -3011,7 +3314,7 @@ mod win {
                 app.refreshing = true;
                 apply_theme_to_ui(app);
                 app.refreshing = false;
-                set_status(app, "Theme reset to the Gruvbox palette.");
+                set_status(app, "Theme reset to the reference palette.");
             }
             ID_BTN_SC_ADD | ID_BTN_REG_ADD | ID_BTN_AS_ADD | ID_BTN_PR_ADD | ID_BTN_PC_ADD => {
                 if let Some(kind) = list_kind_of(id) {

@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-20
+
+### Changed
+
+- **Reference-style Builder Studio.** Replace Gruvbox with the warm-white,
+  forest-green, pale-green, and amber palette from the design reference.
+  Update navigation, step cards, controls, and the live installer preview.
+- **Installer theme defaults.** New projects and reset use the reference
+  palette and standard Windows UI typography. Saved project themes stay intact.
+
 ## [0.4.0] - 2026-11-21
 
 ### Added

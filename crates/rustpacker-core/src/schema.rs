@@ -8,10 +8,9 @@ use serde::{Deserialize, Serialize};
 
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 
-/// Gruvbox dark terminal palette (morhetz/gruvbox). This is the default
-/// for the installer wizard and the Studio's live preview; projects can
-/// override every colour, and older projects keep whatever palette they
-/// were saved with.
+/// Warm-white and forest-green installer palette used by the Studio
+/// reference design; projects can override every colour, and existing
+/// project files keep whatever palette they already saved.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TerminalTheme {
@@ -31,17 +30,17 @@ pub struct TerminalTheme {
 impl Default for TerminalTheme {
     fn default() -> Self {
         Self {
-            background_hex: "#282828".into(),
-            surface_hex: "#32302F".into(),
-            elevated_surface_hex: "#3C3836".into(),
-            border_hex: "#1D2021".into(),
-            accent_hex: "#FABD2F".into(),
-            success_hex: "#B8BB26".into(),
-            warning_hex: "#FE8019".into(),
-            info_hex: "#83A598".into(),
-            text_hex: "#EBDBB2".into(),
-            muted_hex: "#928374".into(),
-            cursor_hex: "#FE8019".into(),
+            background_hex: "#F7F7F2".into(),
+            surface_hex: "#EEF1EC".into(),
+            elevated_surface_hex: "#FFFFFF".into(),
+            border_hex: "#D7DED8".into(),
+            accent_hex: "#24483C".into(),
+            success_hex: "#4F8367".into(),
+            warning_hex: "#D99A21".into(),
+            info_hex: "#367C83".into(),
+            text_hex: "#2D3834".into(),
+            muted_hex: "#758078".into(),
+            cursor_hex: "#D99A21".into(),
         }
     }
 }
@@ -60,19 +59,19 @@ impl TerminalTheme {
     }
 
     pub fn background_rgb(&self) -> (u8, u8, u8) {
-        Self::parse_hex(&self.background_hex).unwrap_or((0x28, 0x28, 0x28))
+        Self::parse_hex(&self.background_hex).unwrap_or((0xF7, 0xF7, 0xF2))
     }
     pub fn surface_rgb(&self) -> (u8, u8, u8) {
-        Self::parse_hex(&self.surface_hex).unwrap_or((0x32, 0x30, 0x2F))
+        Self::parse_hex(&self.surface_hex).unwrap_or((0xEE, 0xF1, 0xEC))
     }
     pub fn text_rgb(&self) -> (u8, u8, u8) {
-        Self::parse_hex(&self.text_hex).unwrap_or((0xEB, 0xDB, 0xB2))
+        Self::parse_hex(&self.text_hex).unwrap_or((0x2D, 0x38, 0x34))
     }
     pub fn accent_rgb(&self) -> (u8, u8, u8) {
-        Self::parse_hex(&self.accent_hex).unwrap_or((0xFA, 0xBD, 0x2F))
+        Self::parse_hex(&self.accent_hex).unwrap_or((0x24, 0x48, 0x3C))
     }
     pub fn muted_rgb(&self) -> (u8, u8, u8) {
-        Self::parse_hex(&self.muted_hex).unwrap_or((0x92, 0x83, 0x74))
+        Self::parse_hex(&self.muted_hex).unwrap_or((0x75, 0x80, 0x78))
     }
 
     pub fn validate(&self) -> Vec<String> {
@@ -1174,20 +1173,20 @@ mod tests {
     }
 
     #[test]
-    fn theme_defaults_are_gruvbox_dark() {
+    fn theme_defaults_match_the_studio_reference() {
         let t = TerminalTheme::default();
-        assert_eq!(t.background_hex, "#282828");
-        assert_eq!(t.surface_hex, "#32302F");
-        assert_eq!(t.elevated_surface_hex, "#3C3836");
-        assert_eq!(t.border_hex, "#1D2021");
-        assert_eq!(t.accent_hex, "#FABD2F");
-        assert_eq!(t.success_hex, "#B8BB26");
-        assert_eq!(t.warning_hex, "#FE8019");
-        assert_eq!(t.info_hex, "#83A598");
-        assert_eq!(t.text_hex, "#EBDBB2");
-        assert_eq!(t.muted_hex, "#928374");
-        assert_eq!(t.cursor_hex, "#FE8019");
-        assert_eq!(t.background_rgb(), (0x28, 0x28, 0x28));
+        assert_eq!(t.background_hex, "#F7F7F2");
+        assert_eq!(t.surface_hex, "#EEF1EC");
+        assert_eq!(t.elevated_surface_hex, "#FFFFFF");
+        assert_eq!(t.border_hex, "#D7DED8");
+        assert_eq!(t.accent_hex, "#24483C");
+        assert_eq!(t.success_hex, "#4F8367");
+        assert_eq!(t.warning_hex, "#D99A21");
+        assert_eq!(t.info_hex, "#367C83");
+        assert_eq!(t.text_hex, "#2D3834");
+        assert_eq!(t.muted_hex, "#758078");
+        assert_eq!(t.cursor_hex, "#D99A21");
+        assert_eq!(t.background_rgb(), (0xF7, 0xF7, 0xF2));
     }
 
     #[test]
