@@ -4,6 +4,12 @@
 //! project on the left, watch the compact terminal wizard preview update
 //! live on the right, then pack a `Setup.exe` with the core packer.
 //!
+//! The Studio's own chrome uses the Gruvbox light palette (cream
+//! surfaces, deep-green toolbar) with a four-step project flow across
+//! the top of the editor and an expert-controls strip along the bottom;
+//! the wizard preview keeps the project's own terminal theme (Gruvbox
+//! dark by default), so what authors see is what end users get.
+//!
 //! The studio is Windows-only. On any other platform `main` prints a
 //! clear message and exits non-zero, so host builds still compile.
 
@@ -96,6 +102,11 @@ mod win {
     // Navigation: group headers at 2100+group, page items at 2200+page.
     const ID_NAV_GROUP: i32 = 2100;
     const ID_NAV_ITEM: i32 = 2200;
+
+    // Step-flow buttons across the top of the editor (2300+step) and the
+    // expert-controls strip along the bottom (2400+entry).
+    const ID_STEP_BTN: i32 = 2300;
+    const ID_EXPERT_BTN: i32 = 2400;
 
     // Centre editor fields, grouped by page.
     const ID_ED_NAME: i32 = 3001;
@@ -251,6 +262,38 @@ mod win {
     ];
     const GROUP_COUNT: usize = 5;
 
+    // The four-step project flow shown across the top of the editor,
+    // mirroring how installer authors think about the work: say what the
+    // package is, choose its files, shape the install experience, build.
+    // Every editor page belongs to exactly one step; the step buttons
+    // land on the page that best represents the step, and the grouped
+    // navigation on the left still reaches every page directly.
+    const STEP_TITLES: [&str; 4] = ["Package identity", "Payload", "User experience", "Build"];
+    const STEP_PAGES: [usize; 4] = [EP_APPLICATION, EP_PAYLOAD, EP_FINISH, EP_BUILD];
+    const STEP_COUNT: usize = 4;
+
+    /// Which step an editor page belongs to (drives the step strip's
+    /// completed/current/upcoming states).
+    fn step_for_page(page: usize) -> usize {
+        match page {
+            EP_APPLICATION => 0,
+            EP_PAYLOAD => 1,
+            EP_BUILD => 3,
+            _ => 2,
+        }
+    }
+
+    // The expert-controls strip: the advanced pages, one click away,
+    // without giving up editor space to a second navigation level.
+    const EXPERT_PAGES: [(&str, usize); 6] = [
+        ("Shortcuts", EP_SHORTCUTS),
+        ("Registry", EP_REGISTRY),
+        ("Associations", EP_ASSOC),
+        ("Prerequisites", EP_PREREQ),
+        ("Processes", EP_PROCESS),
+        ("Theme", EP_THEME),
+    ];
+
     const PAGE_TITLES: [&str; PAGE_COUNT] = [
         "Application",
         "Payload files",
@@ -344,6 +387,30 @@ mod win {
     fn colorref((r, g, b): (u8, u8, u8)) -> COLORREF {
         (r as u32) | ((g as u32) << 8) | ((b as u32) << 16)
     }
+
+    /// The Studio chrome's Gruvbox light palette: cream surfaces and
+    /// warm dark text, with the deep-green toolbar the design calls for.
+    /// Expressed as a `TerminalTheme` so `App::new` can keep its single
+    /// theme-driven brush construction; these colours theme the Studio
+    /// only — the wizard preview uses the project's theme instead.
+    fn studio_theme() -> TerminalTheme {
+        TerminalTheme {
+            background_hex: "#FBF1C7".into(),
+            surface_hex: "#F2E5BC".into(),
+            elevated_surface_hex: "#F9F5D7".into(),
+            border_hex: "#D5C4A1".into(),
+            accent_hex: "#2F5D50".into(),
+            success_hex: "#79740E".into(),
+            warning_hex: "#B57614".into(),
+            info_hex: "#076678".into(),
+            text_hex: "#3C3836".into(),
+            muted_hex: "#7C6F64".into(),
+            cursor_hex: "#B57614".into(),
+        }
+    }
+
+    /// The toolbar strip's deep green (Gruvbox dark aqua/green family).
+    const TOOLBAR_BG: (u8, u8, u8) = (0x24, 0x48, 0x3C);
 
     fn menu(id: i32) -> HMENU {
         id as isize as HMENU
@@ -521,16 +588,26 @@ mod win {
         btn_build: HWND,
         btn_toggle_left: HWND,
         btn_toggle_right: HWND,
-        // left navigation: one header button per group, one item per page
+        // left navigation: brand block, one header button per group, one
+        // item per page, and the get-started hint pinned to the bottom
+        nav_brand: HWND,
+        nav_hint_title: HWND,
+        nav_hint: HWND,
         nav_groups: Vec<HWND>,
         nav_items: Vec<HWND>,
-        // centre editor: title, hint, then the per-page rows
+        // centre editor: eyebrow, title, hint, the step strip, the
+        // per-page rows, and the expert-controls strip along the bottom
+        lbl_eyebrow: HWND,
         lbl_center_title: HWND,
         lbl_center_hint: HWND,
+        step_btns: Vec<HWND>,
+        lbl_expert: HWND,
+        expert_btns: Vec<HWND>,
         pages: Vec<Vec<Row>>,
         /// Every centre-editor control, found by id via `ctl`.
         by_id: Vec<(i32, HWND)>,
         // right panel
+        lbl_preview_header: HWND,
         lbl_page: HWND,
         cb_page: HWND,
         pv_panel: HWND,
@@ -559,12 +636,20 @@ mod win {
                 btn_build: std::ptr::null_mut(),
                 btn_toggle_left: std::ptr::null_mut(),
                 btn_toggle_right: std::ptr::null_mut(),
+                nav_brand: std::ptr::null_mut(),
+                nav_hint_title: std::ptr::null_mut(),
+                nav_hint: std::ptr::null_mut(),
                 nav_groups: Vec::new(),
                 nav_items: vec![std::ptr::null_mut(); PAGE_COUNT],
+                lbl_eyebrow: std::ptr::null_mut(),
                 lbl_center_title: std::ptr::null_mut(),
                 lbl_center_hint: std::ptr::null_mut(),
+                step_btns: Vec::new(),
+                lbl_expert: std::ptr::null_mut(),
+                expert_btns: Vec::new(),
                 pages: vec![Vec::new(); PAGE_COUNT],
                 by_id: Vec::new(),
+                lbl_preview_header: std::ptr::null_mut(),
                 lbl_page: std::ptr::null_mut(),
                 cb_page: std::ptr::null_mut(),
                 pv_panel: std::ptr::null_mut(),
@@ -629,6 +714,18 @@ mod win {
         col_text: COLORREF,
         col_accent: COLORREF,
         col_muted: COLORREF,
+        /// The deep-green toolbar strip.
+        brush_toolbar: HBRUSH,
+        bg_toolbar: COLORREF,
+        /// The wizard preview's own palette, from the project theme's
+        /// defaults: the Studio is Gruvbox light, but the preview must
+        /// show the wizard as end users will see it (Gruvbox dark).
+        brush_pv_surface: HBRUSH,
+        brush_pv_elevated: HBRUSH,
+        pv_bg_surface: COLORREF,
+        pv_bg_elevated: COLORREF,
+        pv_col_text: COLORREF,
+        pv_col_accent: COLORREF,
     }
 
     impl App {
@@ -636,9 +733,9 @@ mod win {
             let (font_ui, font_mono, font_title) = unsafe { make_fonts() };
             let surface_rgb = theme.surface_rgb();
             // L6: the two grey shades were hardcoded in `color_control`, so a
-            // project with a custom theme painted its preview in One Dark
-            // Pro's greys. They are now derived from the theme and kept next
-            // to the brushes that were built from them.
+            // project with a custom theme painted its preview in the default
+            // palette's greys. They are now derived from the theme and kept
+            // next to the brushes that were built from them.
             let elevated_rgb = TerminalTheme::parse_hex(&theme.elevated_surface_hex)
                 .or_else(|| {
                     // A malformed colour in a hand-edited project file falls
@@ -646,7 +743,15 @@ mod win {
                     // to a colour nobody chose.
                     TerminalTheme::parse_hex(&TerminalTheme::default().elevated_surface_hex)
                 })
-                .unwrap_or((0x2C, 0x31, 0x3A));
+                .unwrap_or((0xF9, 0xF5, 0xD7));
+            // The preview keeps the project theme's palette (Gruvbox dark
+            // by default) even though the Studio chrome around it is the
+            // light palette — the preview is a picture of the wizard, not
+            // part of the Studio's furniture.
+            let wizard = TerminalTheme::default();
+            let pv_surface_rgb = wizard.surface_rgb();
+            let pv_elevated_rgb = TerminalTheme::parse_hex(&wizard.elevated_surface_hex)
+                .unwrap_or((0x3C, 0x38, 0x36));
             Self {
                 cfg: ProjectConfig::default(),
                 output_dir: "dist".to_string(),
@@ -682,6 +787,14 @@ mod win {
                 col_text: colorref(theme.text_rgb()),
                 col_accent: colorref(theme.accent_rgb()),
                 col_muted: colorref(theme.muted_rgb()),
+                brush_toolbar: unsafe { CreateSolidBrush(colorref(TOOLBAR_BG)) },
+                bg_toolbar: colorref(TOOLBAR_BG),
+                brush_pv_surface: unsafe { CreateSolidBrush(colorref(pv_surface_rgb)) },
+                brush_pv_elevated: unsafe { CreateSolidBrush(colorref(pv_elevated_rgb)) },
+                pv_bg_surface: colorref(pv_surface_rgb),
+                pv_bg_elevated: colorref(pv_elevated_rgb),
+                pv_col_text: colorref(wizard.text_rgb()),
+                pv_col_accent: colorref(wizard.accent_rgb()),
             }
         }
     }
@@ -695,6 +808,9 @@ mod win {
                 let _ = DeleteObject(self.font_title);
                 let _ = DeleteObject(self.brush_surface);
                 let _ = DeleteObject(self.brush_elevated);
+                let _ = DeleteObject(self.brush_toolbar);
+                let _ = DeleteObject(self.brush_pv_surface);
+                let _ = DeleteObject(self.brush_pv_elevated);
                 // brush_bg is also the window-class background; the process
                 // is exiting when this runs, so it is left to the OS.
             }
@@ -739,7 +855,7 @@ mod win {
             // Per-Monitor DPI V2 awareness (best effort: older hosts ignore it).
             let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
-            let theme = TerminalTheme::default();
+            let theme = studio_theme();
             let hinstance: HINSTANCE = GetModuleHandleW(std::ptr::null());
             let class_name = wide("RustPackerBuilderStudio");
             let brush_bg = CreateSolidBrush(colorref(theme.background_rgb()));
@@ -893,35 +1009,54 @@ mod win {
     /// Pick text/background colours for a child control by identity.
     unsafe fn color_control(app: &App, ctrl: HWND, hdc: HDC, is_edit: bool) -> LRESULT {
         let c = &app.c;
+        // The preview paints in the project theme's palette, not the
+        // Studio's: it is a picture of the wizard end users will run.
         if ctrl == c.pv_title {
-            let _ = SetTextColor(hdc, app.col_accent);
-            let _ = SetBkColor(hdc, app.bg_elevated);
-            return app.brush_elevated as LRESULT;
+            let _ = SetTextColor(hdc, app.pv_col_accent);
+            let _ = SetBkColor(hdc, app.pv_bg_elevated);
+            return app.brush_pv_elevated as LRESULT;
         }
         if ctrl == c.pv_body {
-            let _ = SetTextColor(hdc, app.col_text);
-            let _ = SetBkColor(hdc, app.bg_surface);
-            return app.brush_surface as LRESULT;
+            let _ = SetTextColor(hdc, app.pv_col_text);
+            let _ = SetBkColor(hdc, app.pv_bg_surface);
+            return app.brush_pv_surface as LRESULT;
         }
         if ctrl == c.pv_panel {
-            let _ = SetTextColor(hdc, app.col_text);
-            let _ = SetBkColor(hdc, app.bg_elevated);
-            return app.brush_elevated as LRESULT;
+            let _ = SetTextColor(hdc, app.pv_col_text);
+            let _ = SetBkColor(hdc, app.pv_bg_elevated);
+            return app.brush_pv_elevated as LRESULT;
         }
         if ctrl == c.pv_desktop
             || ctrl == c.pv_launch
             || ctrl == c.pv_launch_tray
             || ctrl == c.pv_login
             || ctrl == c.pv_login_tray
+            || ctrl == c.pv_btn_page
         {
-            let _ = SetTextColor(hdc, app.col_text);
-            let _ = SetBkColor(hdc, app.bg_elevated);
-            return app.brush_elevated as LRESULT;
+            let _ = SetTextColor(hdc, app.pv_col_text);
+            let _ = SetBkColor(hdc, app.pv_bg_elevated);
+            return app.brush_pv_elevated as LRESULT;
         }
-        if ctrl == c.toolbar || ctrl == c.pv_btn_page {
-            let _ = SetTextColor(hdc, app.col_text);
-            let _ = SetBkColor(hdc, app.bg_window);
-            return app.brush_bg as LRESULT;
+        if ctrl == c.toolbar {
+            // The deep-green title strip.
+            let _ = SetTextColor(hdc, app.pv_col_text);
+            let _ = SetBkColor(hdc, app.bg_toolbar);
+            return app.brush_toolbar as LRESULT;
+        }
+        // Step-strip buttons carry their state in their text colour:
+        // completed steps green, the current step amber, the rest muted.
+        if let Some(step) = c.step_btns.iter().position(|&b| b == ctrl) {
+            let current = step_for_page(app.editor_page);
+            let col = if step < current {
+                colorref((0x79, 0x74, 0x0E)) // Gruvbox green (light)
+            } else if step == current {
+                colorref((0xB5, 0x76, 0x14)) // Gruvbox yellow (light)
+            } else {
+                app.col_muted
+            };
+            let _ = SetTextColor(hdc, col);
+            let _ = SetBkColor(hdc, app.bg_surface);
+            return app.brush_surface as LRESULT;
         }
         if ctrl == c.statusbar || ctrl == c.lbl_center_hint {
             let _ = SetTextColor(hdc, app.col_muted);
@@ -934,7 +1069,7 @@ mod win {
             return app.brush_elevated as LRESULT;
         }
         // Labels, panels and checkboxes sit on the surface colour.
-        if ctrl == c.lbl_center_title {
+        if ctrl == c.lbl_center_title || ctrl == c.lbl_eyebrow || ctrl == c.lbl_preview_header {
             let _ = SetTextColor(hdc, app.col_accent);
         } else {
             let _ = SetTextColor(hdc, app.col_text);
@@ -1258,15 +1393,48 @@ mod win {
             app.c.nav_items[page] = b;
         }
 
-        // Centre header.
+        // Sidebar brand and the get-started hint pinned to its bottom.
+        app.c.nav_brand = mk_label(app, parent, "RustPacker Studio", 0);
+        set_font(app.c.nav_brand, app.font_title);
+        app.c.nav_hint_title = mk_label(app, parent, "Get started", 0);
+        set_font(app.c.nav_hint_title, app.font_bold);
+        app.c.nav_hint = mk_label(
+            app,
+            parent,
+            "Create a new installer project and follow the four steps to build your package.",
+            0,
+        );
+
+        // Centre header: eyebrow (current step), title, hint, step strip.
+        app.c.lbl_eyebrow = mk_label(app, parent, "", 0);
+        set_font(app.c.lbl_eyebrow, app.font_bold);
         app.c.lbl_center_title = mk_label(app, parent, "", 0);
         set_font(app.c.lbl_center_title, app.font_title);
         app.c.lbl_center_hint = mk_label(app, parent, "", 0);
+        for (step, title) in STEP_TITLES.iter().enumerate() {
+            let b = mk_button(app, parent, title, ID_STEP_BTN + step as i32);
+            app.c.step_btns.push(b);
+        }
+
+        // Expert-controls strip along the bottom of the editor.
+        app.c.lbl_expert = mk_label(app, parent, "Expert controls", 0);
+        set_font(app.c.lbl_expert, app.font_bold);
+        for (name, _) in EXPERT_PAGES {
+            let b = mk_button(
+                app,
+                parent,
+                name,
+                ID_EXPERT_BTN + app.c.expert_btns.len() as i32,
+            );
+            app.c.expert_btns.push(b);
+        }
 
         build_pages(app, parent);
         create_menu_bar(parent);
 
-        // Right panel: page selector + live preview.
+        // Right panel: preview header, page selector + live preview.
+        app.c.lbl_preview_header = mk_label(app, parent, "INSTALLER PREVIEW", 0);
+        set_font(app.c.lbl_preview_header, app.font_bold);
         app.c.lbl_page = mk_label(app, parent, "Wizard page:", 0);
         app.c.pv_title = mk_label(app, parent, "", ID_PV_TITLE);
         set_font(app.c.pv_title, app.font_title);
@@ -1597,7 +1765,7 @@ mod win {
             ID_ED_TYPEWRITER,
         );
         {
-            let b = mk_button(app, parent, "Reset to One Dark Pro", ID_BTN_THEME_RESET);
+            let b = mk_button(app, parent, "Reset to Gruvbox", ID_BTN_THEME_RESET);
             reg(app, ID_BTN_THEME_RESET, b);
             app.c.pages[EP_THEME].push(Row::new(
                 std::ptr::null_mut(),
@@ -1678,7 +1846,7 @@ mod win {
 
         let cy = toolbar_h;
         let ch = (h - toolbar_h - status_h).max(0);
-        let nav_w = if app.left_collapsed { 0 } else { 216 };
+        let nav_w = if app.left_collapsed { 0 } else { 232 };
         let pv_w = if app.right_collapsed { 0 } else { 330 };
         let center_x = if nav_w > 0 { nav_w + gap } else { 0 };
         let center_w = (w - center_x - if pv_w > 0 { pv_w + gap } else { 0 }).max(0);
@@ -1740,6 +1908,9 @@ mod win {
     unsafe fn layout_nav(app: &mut App) {
         let g = app.geom_left;
         if g.w <= 0 {
+            show(app.c.nav_brand, false);
+            show(app.c.nav_hint_title, false);
+            show(app.c.nav_hint, false);
             for b in app.c.nav_groups.clone() {
                 show(b, false);
             }
@@ -1751,7 +1922,14 @@ mod win {
         refresh_nav(app);
         let x = g.x + 10;
         let w = (g.w - 20).max(40);
-        let mut y = g.y + 10;
+        // Brand block at the top; get-started hint pinned to the bottom.
+        show(app.c.nav_brand, true);
+        move_to(app.c.nav_brand, x, g.y + 12, w, 24);
+        show(app.c.nav_hint_title, true);
+        move_to(app.c.nav_hint_title, x, g.y + g.h - 88, w, 20);
+        show(app.c.nav_hint, true);
+        move_to(app.c.nav_hint, x, g.y + g.h - 64, w, 56);
+        let mut y = g.y + 48;
         for (gi, (_, pages)) in GROUPS.iter().enumerate() {
             let header = app.c.nav_groups[gi];
             show(header, true);
@@ -1784,6 +1962,39 @@ mod win {
         layout(app, hwnd);
     }
 
+    /// Refresh the step strip: captions carry the step number and state
+    /// (✓ done, ● current, ○ upcoming); the current step is bold.
+    unsafe fn refresh_steps(app: &mut App) {
+        let current = step_for_page(app.editor_page);
+        for (step, btn) in app.c.step_btns.clone().iter().enumerate() {
+            let mark = if step < current {
+                "✓"
+            } else if step == current {
+                "●"
+            } else {
+                "○"
+            };
+            set_text(*btn, &format!("{mark} {}. {}", step + 1, STEP_TITLES[step]));
+            set_font(
+                *btn,
+                if step == current {
+                    app.font_bold
+                } else {
+                    app.font_ui
+                },
+            );
+        }
+        set_text(
+            app.c.lbl_eyebrow,
+            &format!(
+                "STEP {} OF {} — {}",
+                current + 1,
+                STEP_COUNT,
+                STEP_TITLES[current].to_uppercase()
+            ),
+        );
+    }
+
     unsafe fn layout_center(app: &mut App) {
         let g = app.geom_center;
         let all: Vec<HWND> = app
@@ -1797,8 +2008,16 @@ mod win {
             })
             .collect();
         if g.w <= 0 {
+            show(app.c.lbl_eyebrow, false);
             show(app.c.lbl_center_title, false);
             show(app.c.lbl_center_hint, false);
+            show(app.c.lbl_expert, false);
+            for b in app.c.step_btns.clone() {
+                show(b, false);
+            }
+            for b in app.c.expert_btns.clone() {
+                show(b, false);
+            }
             for h in all {
                 if !h.is_null() {
                     show(h, false);
@@ -1806,10 +2025,27 @@ mod win {
             }
             return;
         }
+        refresh_steps(app);
+        show(app.c.lbl_eyebrow, true);
         show(app.c.lbl_center_title, true);
         show(app.c.lbl_center_hint, true);
-        move_to(app.c.lbl_center_title, g.x + 16, g.y + 10, g.w - 32, 26);
-        move_to(app.c.lbl_center_hint, g.x + 16, g.y + 40, g.w - 32, 20);
+        move_to(app.c.lbl_eyebrow, g.x + 16, g.y + 10, g.w - 32, 16);
+        move_to(app.c.lbl_center_title, g.x + 16, g.y + 28, g.w - 32, 26);
+        move_to(app.c.lbl_center_hint, g.x + 16, g.y + 58, g.w - 32, 20);
+
+        // Step strip: four equal cards across the editor width.
+        let strip_w = (g.w - 32 - (STEP_COUNT as i32 - 1) * 8).max(40);
+        let step_w = strip_w / STEP_COUNT as i32;
+        for (step, btn) in app.c.step_btns.clone().iter().enumerate() {
+            show(*btn, true);
+            move_to(
+                *btn,
+                g.x + 16 + step as i32 * (step_w + 8),
+                g.y + 84,
+                step_w,
+                38,
+            );
+        }
 
         let current = app.c.pages[app.editor_page].clone();
         let current_set: Vec<HWND> = current
@@ -1824,8 +2060,10 @@ mod win {
 
         let x = g.x + 16;
         let w = (g.w - 32).max(60);
-        let bottom = g.y + g.h - 12;
-        let mut y = g.y + 68;
+        // The expert-controls strip owns the bottom 42px of the editor.
+        let expert_y = g.y + g.h - 42;
+        let bottom = expert_y - 10;
+        let mut y = g.y + 134;
         for row in &current {
             let height = if row.fill {
                 (bottom - y).max(40)
@@ -1868,11 +2106,23 @@ mod win {
                 break;
             }
         }
+
+        // Expert-controls strip along the bottom of the editor.
+        show(app.c.lbl_expert, true);
+        move_to(app.c.lbl_expert, x, expert_y + 6, 104, 20);
+        let expert_x = x + 110;
+        let expert_total = (w - 110).max(60);
+        let btn_w = (expert_total - 5 * 6) / 6;
+        for (i, btn) in app.c.expert_btns.clone().iter().enumerate() {
+            show(*btn, true);
+            move_to(*btn, expert_x + i as i32 * (btn_w + 6), expert_y, btn_w, 30);
+        }
     }
 
     unsafe fn layout_right(app: &mut App) {
         let g = app.geom_right;
         let right_hwnds = [
+            app.c.lbl_preview_header,
             app.c.lbl_page,
             app.c.cb_page,
             app.c.pv_panel,
@@ -1892,16 +2142,18 @@ mod win {
             }
             return;
         }
+        show(app.c.lbl_preview_header, true);
         show(app.c.lbl_page, true);
         show(app.c.cb_page, true);
         show(app.c.pv_panel, true);
-        move_to(app.c.lbl_page, g.x + 12, g.y + 11, 92, 20);
-        move_to(app.c.cb_page, g.x + 108, g.y + 8, 176, 110);
+        move_to(app.c.lbl_preview_header, g.x + 12, g.y + 10, g.w - 24, 20);
+        move_to(app.c.lbl_page, g.x + 12, g.y + 37, 92, 20);
+        move_to(app.c.cb_page, g.x + 108, g.y + 34, 176, 110);
         app.geom_pv = Rect {
             x: g.x + 10,
-            y: g.y + 42,
+            y: g.y + 66,
             w: (g.w - 20).max(0),
-            h: (g.h - 52).max(0),
+            h: (g.h - 76).max(0),
         };
         let pv = app.geom_pv;
         move_to(app.c.pv_panel, pv.x, pv.y, pv.w, pv.h);
@@ -2759,7 +3011,7 @@ mod win {
                 app.refreshing = true;
                 apply_theme_to_ui(app);
                 app.refreshing = false;
-                set_status(app, "Theme reset to the One Dark Pro palette.");
+                set_status(app, "Theme reset to the Gruvbox palette.");
             }
             ID_BTN_SC_ADD | ID_BTN_REG_ADD | ID_BTN_AS_ADD | ID_BTN_PR_ADD | ID_BTN_PC_ADD => {
                 if let Some(kind) = list_kind_of(id) {
@@ -2770,6 +3022,12 @@ mod win {
                 if let Some(kind) = list_kind_of(id) {
                     list_remove(app, kind);
                 }
+            }
+            _ if (ID_STEP_BTN..ID_STEP_BTN + STEP_COUNT as i32).contains(&id) => {
+                show_page(app, hwnd, STEP_PAGES[(id - ID_STEP_BTN) as usize]);
+            }
+            _ if (ID_EXPERT_BTN..ID_EXPERT_BTN + EXPERT_PAGES.len() as i32).contains(&id) => {
+                show_page(app, hwnd, EXPERT_PAGES[(id - ID_EXPERT_BTN) as usize].1);
             }
             _ if (ID_NAV_GROUP..ID_NAV_GROUP + GROUP_COUNT as i32).contains(&id) => {
                 let gi = (id - ID_NAV_GROUP) as usize;

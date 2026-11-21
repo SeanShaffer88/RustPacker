@@ -8,7 +8,10 @@ use serde::{Deserialize, Serialize};
 
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 
-/// One Dark Pro terminal palette (zhuangtongfa.Material-theme).
+/// Gruvbox dark terminal palette (morhetz/gruvbox). This is the default
+/// for the installer wizard and the Studio's live preview; projects can
+/// override every colour, and older projects keep whatever palette they
+/// were saved with.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TerminalTheme {
@@ -28,17 +31,17 @@ pub struct TerminalTheme {
 impl Default for TerminalTheme {
     fn default() -> Self {
         Self {
-            background_hex: "#282C34".into(),
-            surface_hex: "#21252B".into(),
-            elevated_surface_hex: "#2C313A".into(),
-            border_hex: "#181A1F".into(),
-            accent_hex: "#E06C75".into(),
-            success_hex: "#98C379".into(),
-            warning_hex: "#E5C07B".into(),
-            info_hex: "#61AFEF".into(),
-            text_hex: "#ABB2BF".into(),
-            muted_hex: "#5C6370".into(),
-            cursor_hex: "#528BFF".into(),
+            background_hex: "#282828".into(),
+            surface_hex: "#32302F".into(),
+            elevated_surface_hex: "#3C3836".into(),
+            border_hex: "#1D2021".into(),
+            accent_hex: "#FABD2F".into(),
+            success_hex: "#B8BB26".into(),
+            warning_hex: "#FE8019".into(),
+            info_hex: "#83A598".into(),
+            text_hex: "#EBDBB2".into(),
+            muted_hex: "#928374".into(),
+            cursor_hex: "#FE8019".into(),
         }
     }
 }
@@ -57,19 +60,19 @@ impl TerminalTheme {
     }
 
     pub fn background_rgb(&self) -> (u8, u8, u8) {
-        Self::parse_hex(&self.background_hex).unwrap_or((0x28, 0x2C, 0x34))
+        Self::parse_hex(&self.background_hex).unwrap_or((0x28, 0x28, 0x28))
     }
     pub fn surface_rgb(&self) -> (u8, u8, u8) {
-        Self::parse_hex(&self.surface_hex).unwrap_or((0x21, 0x25, 0x2B))
+        Self::parse_hex(&self.surface_hex).unwrap_or((0x32, 0x30, 0x2F))
     }
     pub fn text_rgb(&self) -> (u8, u8, u8) {
-        Self::parse_hex(&self.text_hex).unwrap_or((0xAB, 0xB2, 0xBF))
+        Self::parse_hex(&self.text_hex).unwrap_or((0xEB, 0xDB, 0xB2))
     }
     pub fn accent_rgb(&self) -> (u8, u8, u8) {
-        Self::parse_hex(&self.accent_hex).unwrap_or((0xE0, 0x6C, 0x75))
+        Self::parse_hex(&self.accent_hex).unwrap_or((0xFA, 0xBD, 0x2F))
     }
     pub fn muted_rgb(&self) -> (u8, u8, u8) {
-        Self::parse_hex(&self.muted_hex).unwrap_or((0x5C, 0x63, 0x70))
+        Self::parse_hex(&self.muted_hex).unwrap_or((0x92, 0x83, 0x74))
     }
 
     pub fn validate(&self) -> Vec<String> {
@@ -1171,20 +1174,20 @@ mod tests {
     }
 
     #[test]
-    fn theme_defaults_are_one_dark_pro() {
+    fn theme_defaults_are_gruvbox_dark() {
         let t = TerminalTheme::default();
-        assert_eq!(t.background_hex, "#282C34");
-        assert_eq!(t.surface_hex, "#21252B");
-        assert_eq!(t.elevated_surface_hex, "#2C313A");
-        assert_eq!(t.border_hex, "#181A1F");
-        assert_eq!(t.accent_hex, "#E06C75");
-        assert_eq!(t.success_hex, "#98C379");
-        assert_eq!(t.warning_hex, "#E5C07B");
-        assert_eq!(t.info_hex, "#61AFEF");
-        assert_eq!(t.text_hex, "#ABB2BF");
-        assert_eq!(t.muted_hex, "#5C6370");
-        assert_eq!(t.cursor_hex, "#528BFF");
-        assert_eq!(t.background_rgb(), (0x28, 0x2C, 0x34));
+        assert_eq!(t.background_hex, "#282828");
+        assert_eq!(t.surface_hex, "#32302F");
+        assert_eq!(t.elevated_surface_hex, "#3C3836");
+        assert_eq!(t.border_hex, "#1D2021");
+        assert_eq!(t.accent_hex, "#FABD2F");
+        assert_eq!(t.success_hex, "#B8BB26");
+        assert_eq!(t.warning_hex, "#FE8019");
+        assert_eq!(t.info_hex, "#83A598");
+        assert_eq!(t.text_hex, "#EBDBB2");
+        assert_eq!(t.muted_hex, "#928374");
+        assert_eq!(t.cursor_hex, "#FE8019");
+        assert_eq!(t.background_rgb(), (0x28, 0x28, 0x28));
     }
 
     #[test]

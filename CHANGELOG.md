@@ -8,6 +8,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Gruvbox Builder Studio.** The Studio has been reskinned and
+  restructured around the authoring flow: Gruvbox light chrome (cream
+  surfaces, deep-green toolbar, green/amber step states), a sidebar
+  with the Studio brand and a get-started hint, a four-step project
+  flow across the top of the editor (Package identity → Payload →
+  User experience → Build, with completed/current/upcoming states), an
+  expert-controls strip along the bottom that jumps straight to the
+  advanced pages (Shortcuts, Registry, Associations, Prerequisites,
+  Processes, Theme), and an "INSTALLER PREVIEW" header over the live
+  preview. The preview itself keeps the project's own terminal palette,
+  so authors see the wizard exactly as end users will.
+
 - **Silent, scriptable installs.** A packed `Setup.exe` now installs
   with no windows at all: `Setup.exe --silent [--dir <folder>]` uses the
   project's defaults (default install folder unless `--dir` overrides
@@ -29,6 +41,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Gruvbox is now the default terminal palette.** New projects (and
+  "Reset to Gruvbox" on the Theme page) use the Gruvbox dark palette
+  for the installer wizard instead of One Dark Pro. Existing projects
+  keep whatever palette they were saved with.
 - **Dependency updates (Dependabot).** `toml` 0.8 → 1.2.1 and `zstd`
   0.13 → 0.14.4 (#11, #8); `actions/checkout` and `actions/upload-artifact`
   to v7 (#7, #10). `sha2` stays at 0.10.9: the 0.11 line's dependency tree
