@@ -750,8 +750,8 @@ mod win {
             // part of the Studio's furniture.
             let wizard = TerminalTheme::default();
             let pv_surface_rgb = wizard.surface_rgb();
-            let pv_elevated_rgb =
-                TerminalTheme::parse_hex(&wizard.elevated_surface_hex).unwrap_or((0x3C, 0x38, 0x36));
+            let pv_elevated_rgb = TerminalTheme::parse_hex(&wizard.elevated_surface_hex)
+                .unwrap_or((0x3C, 0x38, 0x36));
             Self {
                 cfg: ProjectConfig::default(),
                 output_dir: "dist".to_string(),
@@ -1411,13 +1411,8 @@ mod win {
         app.c.lbl_center_title = mk_label(app, parent, "", 0);
         set_font(app.c.lbl_center_title, app.font_title);
         app.c.lbl_center_hint = mk_label(app, parent, "", 0);
-        for step in 0..STEP_COUNT {
-            let b = mk_button(
-                app,
-                parent,
-                STEP_TITLES[step],
-                ID_STEP_BTN + step as i32,
-            );
+        for (step, title) in STEP_TITLES.iter().enumerate() {
+            let b = mk_button(app, parent, title, ID_STEP_BTN + step as i32);
             app.c.step_btns.push(b);
         }
 
@@ -1425,7 +1420,12 @@ mod win {
         app.c.lbl_expert = mk_label(app, parent, "Expert controls", 0);
         set_font(app.c.lbl_expert, app.font_bold);
         for (name, _) in EXPERT_PAGES {
-            let b = mk_button(app, parent, name, ID_EXPERT_BTN + app.c.expert_btns.len() as i32);
+            let b = mk_button(
+                app,
+                parent,
+                name,
+                ID_EXPERT_BTN + app.c.expert_btns.len() as i32,
+            );
             app.c.expert_btns.push(b);
         }
 
@@ -1974,10 +1974,7 @@ mod win {
             } else {
                 "○"
             };
-            set_text(
-                *btn,
-                &format!("{mark} {}. {}", step + 1, STEP_TITLES[step]),
-            );
+            set_text(*btn, &format!("{mark} {}. {}", step + 1, STEP_TITLES[step]));
             set_font(
                 *btn,
                 if step == current {
