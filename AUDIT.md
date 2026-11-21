@@ -384,7 +384,7 @@ L1–L17, CI hardening (clippy/fmt/Linux/`--locked`/cache/artifacts/audit/Depend
 
 ## Appendix A — Dependency inventory (`Cargo.lock`)
 
-48 packages. Direct: `serde 1.0.229`, `serde_json 1.0.154`, `toml 0.8.23`, `sha2 0.10.9`, `zstd 0.13.5`, `windows-sys 0.61.2` (Windows only). Transitive highlights: `zstd-sys 2.1.3+zstd.1.5.7` (C library — track for CVEs), `toml_edit 0.22.27`, `winnow 0.7.15`, `zmij 1.0.23`. No audit tool was available in this sandbox; run `cargo audit` and `cargo deny check licenses bans` in CI (L10).
+46 packages. Direct: `serde 1.0.229`, `serde_json 1.0.154`, `toml 1.2.1`, `sha2 0.10.9`, `zstd 0.14.4`, `windows-sys 0.61.2` (Windows only). Transitive highlights: `zstd-sys 2.1.3+zstd.1.5.7` (C library — track for CVEs), `toml_datetime 1.1.3`, `winnow 1.0.5`, `zmij 1.0.23`. `sha2` stays on 0.10.x deliberately: 0.11's dependency tree needs a newer Rust than the project's 1.85 MSRV (PR #9, closed with the reasoning recorded). No audit tool was available in this sandbox; run `cargo audit` and `cargo deny check licenses bans` in CI (L10).
 
 ## Appendix B — Audit checklist (all items checked)
 

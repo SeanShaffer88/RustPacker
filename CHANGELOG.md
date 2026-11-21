@@ -6,7 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+
+- **Dependency updates (Dependabot).** `toml` 0.8 → 1.2.1 and `zstd`
+  0.13 → 0.14.4 (#11, #8); `actions/checkout` and `actions/upload-artifact`
+  to v7 (#7, #10). `sha2` stays at 0.10.9: the 0.11 line's dependency tree
+  requires a newer Rust than the 1.85 MSRV this project states and
+  CI-verifies, and 0.10.9 has no open advisory (#9, closed with details).
 
 ## [0.3.0] - 2026-11-20
 
