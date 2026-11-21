@@ -96,6 +96,10 @@ mod win {
     // Navigation: group headers at 2100+group, page items at 2200+page.
     const ID_NAV_GROUP: i32 = 2100;
     const ID_NAV_ITEM: i32 = 2200;
+    const ID_NAV_NEW_PROJECT: i32 = 2000;
+    const ID_NAV_PROJECTS: i32 = 2001;
+    const ID_NAV_TEMPLATES: i32 = 2002;
+    const ID_NAV_SETTINGS: i32 = 2003;
 
     // Step-flow buttons across the top of the editor (2300+step) and the
     // expert-controls strip along the bottom (2400+entry).
@@ -219,6 +223,7 @@ mod win {
     const ID_PV_CHK_LOGIN: i32 = 1208;
     const ID_PV_CHK_LOGIN_TRAY: i32 = 1209;
     const ID_PV_BTN_PAGE: i32 = 1210;
+    const ID_PV_BTN_CANCEL: i32 = 1211;
 
     const PAGE_WELCOME: usize = 0;
     const PAGE_DIRECTORY: usize = 1;
@@ -269,6 +274,7 @@ mod win {
         "Screens, language, behavior",
         "Configure and build",
     ];
+    const STEP_ICONS: [&str; 4] = ["◇", "☁", "♙", "⚒"];
     const STEP_PAGES: [usize; 4] = [EP_APPLICATION, EP_PAYLOAD, EP_FINISH, EP_BUILD];
     const STEP_COUNT: usize = 4;
 
@@ -567,6 +573,10 @@ mod win {
         // left navigation: brand block, one header button per group, one
         // item per page, and the get-started hint pinned to the bottom
         nav_brand: HWND,
+        nav_new_project: HWND,
+        nav_projects: HWND,
+        nav_templates: HWND,
+        nav_settings: HWND,
         nav_hint_title: HWND,
         nav_hint: HWND,
         nav_groups: Vec<HWND>,
@@ -576,8 +586,11 @@ mod win {
         lbl_eyebrow: HWND,
         lbl_center_title: HWND,
         lbl_center_hint: HWND,
+        lbl_build_title: HWND,
+        lbl_build_hint: HWND,
         step_btns: Vec<HWND>,
         lbl_expert: HWND,
+        lbl_expert_hint: HWND,
         expert_btns: Vec<HWND>,
         pages: Vec<Vec<Row>>,
         /// Every centre-editor control, found by id via `ctl`.
@@ -596,6 +609,7 @@ mod win {
         pv_login: HWND,
         pv_login_tray: HWND,
         pv_btn_page: HWND,
+        pv_btn_cancel: HWND,
     }
 
     impl Ctrls {
@@ -616,6 +630,10 @@ mod win {
                 btn_toggle_left: std::ptr::null_mut(),
                 btn_toggle_right: std::ptr::null_mut(),
                 nav_brand: std::ptr::null_mut(),
+                nav_new_project: std::ptr::null_mut(),
+                nav_projects: std::ptr::null_mut(),
+                nav_templates: std::ptr::null_mut(),
+                nav_settings: std::ptr::null_mut(),
                 nav_hint_title: std::ptr::null_mut(),
                 nav_hint: std::ptr::null_mut(),
                 nav_groups: Vec::new(),
@@ -623,8 +641,11 @@ mod win {
                 lbl_eyebrow: std::ptr::null_mut(),
                 lbl_center_title: std::ptr::null_mut(),
                 lbl_center_hint: std::ptr::null_mut(),
+                lbl_build_title: std::ptr::null_mut(),
+                lbl_build_hint: std::ptr::null_mut(),
                 step_btns: Vec::new(),
                 lbl_expert: std::ptr::null_mut(),
+                lbl_expert_hint: std::ptr::null_mut(),
                 expert_btns: Vec::new(),
                 pages: vec![Vec::new(); PAGE_COUNT],
                 by_id: Vec::new(),
@@ -641,6 +662,7 @@ mod win {
                 pv_login: std::ptr::null_mut(),
                 pv_login_tray: std::ptr::null_mut(),
                 pv_btn_page: std::ptr::null_mut(),
+                pv_btn_cancel: std::ptr::null_mut(),
             }
         }
     }
@@ -658,6 +680,8 @@ mod win {
         page: usize,
         /// The editor page the centre of the window is showing.
         editor_page: usize,
+        /// The reference-style new-project overview is the launch screen.
+        home_view: bool,
         /// Which navigation groups are collapsed.
         nav_collapsed: [bool; GROUP_COUNT],
         /// Selected row of each list editor (-1 = none).
@@ -679,6 +703,7 @@ mod win {
         geom_pv: Rect,
         font_ui: HFONT,
         font_bold: HFONT,
+        font_small: HFONT,
         font_mono: HFONT,
         font_title: HFONT,
         brush_bg: HBRUSH,
@@ -702,9 +727,7 @@ mod win {
         /// The wizard preview's own palette, from the project theme's
         /// defaults: the Studio has a fixed reference palette, while the
         /// preview uses the project's installer palette.
-        brush_pv_surface: HBRUSH,
         brush_pv_elevated: HBRUSH,
-        pv_bg_surface: COLORREF,
         pv_bg_elevated: COLORREF,
         pv_col_text: COLORREF,
         pv_col_accent: COLORREF,
@@ -731,7 +754,6 @@ mod win {
             // The preview keeps the project's installer palette so it
             // stays an honest preview rather than a copy of Studio chrome.
             let wizard = TerminalTheme::default();
-            let pv_surface_rgb = wizard.surface_rgb();
             let pv_elevated_rgb = TerminalTheme::parse_hex(&wizard.elevated_surface_hex)
                 .unwrap_or((0xFF, 0xFF, 0xFF));
             Self {
@@ -741,7 +763,8 @@ mod win {
                 build_portable: false,
                 project_path: None,
                 page: PAGE_WELCOME,
-                editor_page: EP_APPLICATION,
+                editor_page: EP_BUILD,
+                home_view: true,
                 nav_collapsed: [false; GROUP_COUNT],
                 list_sel: [-1; LIST_KINDS],
                 preview: FinishSelection::from_defaults(&ProjectConfig::default().finish),
@@ -757,6 +780,7 @@ mod win {
                 geom_pv: Rect::default(),
                 font_ui,
                 font_bold: unsafe { make_font("Segoe UI", -15, true) },
+                font_small: unsafe { make_font("Segoe UI", -11, false) },
                 font_mono,
                 font_title,
                 // Assigned by run() from the window-class background brush.
@@ -773,9 +797,7 @@ mod win {
                 col_muted: colorref(theme.muted_rgb()),
                 brush_toolbar: unsafe { CreateSolidBrush(colorref(TOOLBAR_BG)) },
                 bg_toolbar: colorref(TOOLBAR_BG),
-                brush_pv_surface: unsafe { CreateSolidBrush(colorref(pv_surface_rgb)) },
                 brush_pv_elevated: unsafe { CreateSolidBrush(colorref(pv_elevated_rgb)) },
-                pv_bg_surface: colorref(pv_surface_rgb),
                 pv_bg_elevated: colorref(pv_elevated_rgb),
                 pv_col_text: colorref(wizard.text_rgb()),
                 pv_col_accent: colorref(wizard.accent_rgb()),
@@ -788,6 +810,7 @@ mod win {
             unsafe {
                 let _ = DeleteObject(self.font_ui);
                 let _ = DeleteObject(self.font_bold);
+                let _ = DeleteObject(self.font_small);
                 let _ = DeleteObject(self.font_mono);
                 let _ = DeleteObject(self.font_title);
                 let _ = DeleteObject(self.brush_surface);
@@ -795,7 +818,6 @@ mod win {
                 let _ = DeleteObject(self.brush_border);
                 let _ = DeleteObject(self.brush_warning);
                 let _ = DeleteObject(self.brush_toolbar);
-                let _ = DeleteObject(self.brush_pv_surface);
                 let _ = DeleteObject(self.brush_pv_elevated);
                 // brush_bg is also the window-class background; the process
                 // is exiting when this runs, so it is left to the OS.
@@ -899,8 +921,8 @@ mod win {
                 WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
-                1340,
-                820,
+                1024,
+                640,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
                 hinstance,
@@ -959,7 +981,10 @@ mod win {
                     layout(app, hwnd);
                     apply_config_to_ui(app);
                     set_text(app.c.lbl_center_title, "Create your installer");
-                    set_text(app.c.lbl_center_hint, PAGE_HINTS[app.editor_page]);
+                    set_text(
+                        app.c.lbl_center_hint,
+                        "Follow the steps below to define your application, configure the installation experience, and build a distributable installer package.",
+                    );
                     refresh_preview(app);
                     set_status(
                         app,
@@ -977,8 +1002,8 @@ mod win {
             }
             WM_GETMINMAXINFO => {
                 let mmi = &mut *(lparam as *mut MINMAXINFO);
-                mmi.ptMinTrackSize.x = 1060;
-                mmi.ptMinTrackSize.y = 640;
+                mmi.ptMinTrackSize.x = 980;
+                mmi.ptMinTrackSize.y = 600;
                 0
             }
             WM_COMMAND => {
@@ -1052,10 +1077,18 @@ mod win {
         }
         if id == ID_PV_PANEL {
             let _ = FillRect(hdc, &rect, app.brush_pv_elevated);
-            let rail_width = ((rect.right - rect.left) / 5).clamp(42, 64);
-            let rail = RECT {
+            let topbar_height = 18;
+            let topbar = RECT {
                 left: rect.left,
                 top: rect.top,
+                right: rect.right,
+                bottom: rect.top + topbar_height,
+            };
+            let _ = FillRect(hdc, &topbar, app.brush_toolbar);
+            let rail_width = ((rect.right - rect.left) / 5).clamp(42, 56);
+            let rail = RECT {
+                left: rect.left,
+                top: rect.top + topbar_height,
                 right: rect.left + rail_width,
                 bottom: rect.bottom,
             };
@@ -1063,16 +1096,70 @@ mod win {
             let _ = FrameRect(hdc, &rect, app.brush_border);
             draw_item_text(
                 hdc,
-                "◇",
+                "⬡",
                 RECT {
                     left: rail.left + 4,
-                    top: rail.top + 16,
+                    top: rail.top + 18,
                     right: rail.right - 4,
-                    bottom: rail.top + 56,
+                    bottom: rail.top + 58,
                 },
                 colorref(TOOLBAR_TEXT),
                 app.font_title,
                 DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            );
+            draw_item_text(
+                hdc,
+                "−  □  ×",
+                RECT {
+                    left: rect.right - 62,
+                    top: rect.top + 1,
+                    right: rect.right - 7,
+                    bottom: rect.top + topbar_height - 1,
+                },
+                colorref(TOOLBAR_TEXT),
+                app.font_ui,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+            );
+            return 1;
+        }
+
+        if (ID_NAV_NEW_PROJECT..=ID_NAV_SETTINGS).contains(&id) {
+            let selected = (id == ID_NAV_NEW_PROJECT && app.home_view)
+                || (id == ID_NAV_SETTINGS && app.editor_page == EP_THEME);
+            let _ = FillRect(
+                hdc,
+                &rect,
+                if selected {
+                    app.brush_elevated
+                } else {
+                    app.brush_surface
+                },
+            );
+            if selected {
+                let marker = RECT {
+                    left: rect.left,
+                    top: rect.top + 3,
+                    right: rect.left + 3,
+                    bottom: rect.bottom - 3,
+                };
+                let _ = FillRect(hdc, &marker, app.brush_toolbar);
+            }
+            draw_item_text(
+                hdc,
+                &get_text(item.hwndItem),
+                RECT {
+                    left: rect.left + 12,
+                    top: rect.top + 1,
+                    right: rect.right - 7,
+                    bottom: rect.bottom - 1,
+                },
+                if selected {
+                    app.col_accent
+                } else {
+                    app.col_text
+                },
+                if selected { app.font_bold } else { app.font_ui },
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE,
             );
             return 1;
         }
@@ -1133,34 +1220,40 @@ mod win {
             } else {
                 app.col_muted
             };
-            let marker = if step < current {
-                "✓"
-            } else if step == current {
-                "●"
-            } else {
-                "○"
-            };
             draw_item_text(
                 hdc,
-                marker,
+                STEP_ICONS[step],
                 RECT {
                     left: rect.left + 8,
-                    top: rect.top + 7,
-                    right: rect.left + 31,
-                    bottom: rect.top + 29,
+                    top: rect.top + 3,
+                    right: rect.left + 42,
+                    bottom: rect.top + 40,
                 },
                 marker_color,
-                app.font_bold,
+                app.font_title,
                 DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            );
+            draw_item_text(
+                hdc,
+                &format!("{}.", step + 1),
+                RECT {
+                    left: rect.left + 9,
+                    top: rect.top + 40,
+                    right: rect.left + 24,
+                    bottom: rect.top + 56,
+                },
+                app.col_muted,
+                app.font_ui,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE,
             );
             draw_item_text(
                 hdc,
                 STEP_TITLES[step],
                 RECT {
-                    left: rect.left + 34,
-                    top: rect.top + 7,
+                    left: rect.left + 10,
+                    top: rect.top + 58,
                     right: rect.right - 8,
-                    bottom: rect.top + 29,
+                    bottom: rect.top + 78,
                 },
                 if disabled {
                     app.col_muted
@@ -1174,8 +1267,8 @@ mod win {
                 hdc,
                 STEP_DESCRIPTIONS[step],
                 RECT {
-                    left: rect.left + 34,
-                    top: rect.top + 32,
+                    left: rect.left + 10,
+                    top: rect.top + 82,
                     right: rect.right - 8,
                     bottom: rect.bottom - 6,
                 },
@@ -1183,9 +1276,47 @@ mod win {
                 app.font_ui,
                 DT_LEFT | DT_WORDBREAK,
             );
+            let state_marker = if step < current {
+                "✓"
+            } else if step == current {
+                "●"
+            } else {
+                "○"
+            };
+            draw_item_text(
+                hdc,
+                state_marker,
+                RECT {
+                    left: rect.right - 24,
+                    top: rect.top + 5,
+                    right: rect.right - 5,
+                    bottom: rect.top + 24,
+                },
+                marker_color,
+                app.font_bold,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            );
             return 1;
         }
 
+        if id == ID_PV_BTN_CANCEL {
+            let _ = FillRect(hdc, &rect, app.brush_elevated);
+            let _ = FrameRect(hdc, &rect, app.brush_border);
+            draw_item_text(
+                hdc,
+                &get_text(item.hwndItem),
+                RECT {
+                    left: rect.left + 4,
+                    top: rect.top + 1,
+                    right: rect.right - 4,
+                    bottom: rect.bottom - 1,
+                },
+                app.pv_col_text,
+                app.font_ui,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            );
+            return 1;
+        }
         if (ID_NAV_ITEM..ID_NAV_ITEM + PAGE_COUNT as i32).contains(&id) {
             let page = (id - ID_NAV_ITEM) as usize;
             let selected = page == app.editor_page;
@@ -1337,8 +1468,8 @@ mod win {
         }
         if ctrl == c.pv_body {
             let _ = SetTextColor(hdc, app.pv_col_text);
-            let _ = SetBkColor(hdc, app.pv_bg_surface);
-            return app.brush_pv_surface as LRESULT;
+            let _ = SetBkColor(hdc, app.pv_bg_elevated);
+            return app.brush_pv_elevated as LRESULT;
         }
         if ctrl == c.pv_panel {
             let _ = SetTextColor(hdc, app.pv_col_text);
@@ -1350,6 +1481,7 @@ mod win {
             || ctrl == c.pv_launch_tray
             || ctrl == c.pv_login
             || ctrl == c.pv_login_tray
+            || ctrl == c.pv_btn_cancel
             || ctrl == c.pv_btn_page
         {
             let _ = SetTextColor(hdc, app.pv_col_text);
@@ -1695,6 +1827,10 @@ mod win {
         // Sidebar brand and the get-started hint pinned to its bottom.
         app.c.nav_brand = mk_label(app, parent, "RustPacker Studio", 0);
         set_font(app.c.nav_brand, app.font_bold);
+        app.c.nav_new_project = mk_button(app, parent, "⌂  New Project", ID_NAV_NEW_PROJECT);
+        app.c.nav_projects = mk_button(app, parent, "▣  Projects", ID_NAV_PROJECTS);
+        app.c.nav_templates = mk_button(app, parent, "▤  Templates", ID_NAV_TEMPLATES);
+        app.c.nav_settings = mk_button(app, parent, "⚙  Settings", ID_NAV_SETTINGS);
         app.c.nav_hint_title = mk_label(app, parent, "Get started", 0);
         set_font(app.c.nav_hint_title, app.font_bold);
         app.c.nav_hint = mk_label(
@@ -1710,14 +1846,28 @@ mod win {
         app.c.lbl_center_title = mk_label(app, parent, "", 0);
         set_font(app.c.lbl_center_title, app.font_title);
         app.c.lbl_center_hint = mk_label(app, parent, "", 0);
+        app.c.lbl_build_title = mk_label(app, parent, "Build your installer", 0);
+        set_font(app.c.lbl_build_title, app.font_bold);
+        app.c.lbl_build_hint = mk_label(
+            app,
+            parent,
+            "Review your configuration and generate a distributable installer package.",
+            0,
+        );
         for (step, title) in STEP_TITLES.iter().enumerate() {
             let b = mk_button(app, parent, title, ID_STEP_BTN + step as i32);
             app.c.step_btns.push(b);
         }
 
         // Expert-controls strip along the bottom of the editor.
-        app.c.lbl_expert = mk_label(app, parent, "Expert controls", 0);
+        app.c.lbl_expert = mk_label(app, parent, "⌄  Expert controls", 0);
         set_font(app.c.lbl_expert, app.font_bold);
+        app.c.lbl_expert_hint = mk_label(
+            app,
+            parent,
+            "Advanced configuration options for professional use.",
+            0,
+        );
         for (name, _) in EXPERT_PAGES {
             let b = mk_button(
                 app,
@@ -1738,47 +1888,51 @@ mod win {
             "This is how your installer will look to end users. The preview updates as you configure each step.",
             0,
         );
+        set_font(app.c.lbl_preview_caption, app.font_small);
         app.c.lbl_page = mk_label(app, parent, "Wizard page:", 0);
         app.c.pv_title = mk_label(app, parent, "", ID_PV_TITLE);
         set_font(app.c.pv_title, app.font_bold);
-        app.c.pv_body = mk_edit(app, parent, ID_PV_BODY, true);
+        app.c.pv_body = mk_label(app, parent, "", ID_PV_BODY);
+        set_font(app.c.pv_body, app.font_small);
         app.c.pv_desktop = mk_check(
             app,
             parent,
             "Create Desktop shortcut",
             ID_PV_CHK_DESKTOP,
-            app.font_mono,
+            app.font_small,
         );
         app.c.pv_launch = mk_check(
             app,
             parent,
             "Launch after setup exits",
             ID_PV_CHK_LAUNCH,
-            app.font_mono,
+            app.font_small,
         );
         app.c.pv_launch_tray = mk_check(
             app,
             parent,
             "Start minimized to system tray",
             ID_PV_CHK_LAUNCH_TRAY,
-            app.font_mono,
+            app.font_small,
         );
         app.c.pv_login = mk_check(
             app,
             parent,
             "Launch at Windows login",
             ID_PV_CHK_LOGIN,
-            app.font_mono,
+            app.font_small,
         );
         app.c.pv_login_tray = mk_check(
             app,
             parent,
             "Start minimized to system tray",
             ID_PV_CHK_LOGIN_TRAY,
-            app.font_mono,
+            app.font_small,
         );
-        app.c.pv_btn_page = mk_button(app, parent, "Finish", ID_PV_BTN_PAGE);
-        set_font(app.c.pv_btn_page, app.font_mono);
+        app.c.pv_btn_cancel = mk_button(app, parent, "Cancel", ID_PV_BTN_CANCEL);
+        set_font(app.c.pv_btn_cancel, app.font_small);
+        app.c.pv_btn_page = mk_button(app, parent, "Next", ID_PV_BTN_PAGE);
+        set_font(app.c.pv_btn_page, app.font_small);
     }
 
     unsafe fn build_pages(app: &mut App, parent: HWND) {
@@ -2132,87 +2286,88 @@ mod win {
         let _ = GetClientRect(hwnd, &mut rc);
         let w = (rc.right - rc.left).max(0);
         let h = (rc.bottom - rc.top).max(0);
-        let toolbar_h = 44;
-        let status_h = 24;
-        let gap = 4;
+        let toolbar_h = if app.home_view { 0 } else { 44 };
+        let status_h = if app.home_view { 0 } else { 24 };
+        let content_y = toolbar_h;
+        let content_h = (h - toolbar_h - status_h).max(0);
 
-        move_to(app.c.toolbar, 0, 0, w, toolbar_h);
-        move_to(app.c.toolbar_title, 12, 8, 162, 28);
-        move_to(app.c.btn_new, 180, 8, 60, 28);
-        move_to(app.c.btn_load, 246, 8, 70, 28);
-        move_to(app.c.btn_save, 322, 8, 70, 28);
-        move_to(app.c.btn_validate, 398, 8, 82, 28);
-        move_to(app.c.btn_build, 486, 8, 130, 28);
-        move_to(app.c.btn_toggle_right, w - 126, 8, 118, 28);
-        move_to(app.c.btn_toggle_left, w - 268, 8, 136, 28);
+        show(app.c.toolbar, !app.home_view);
+        show(app.c.toolbar_title, !app.home_view);
+        for control in [
+            app.c.btn_new,
+            app.c.btn_load,
+            app.c.btn_save,
+            app.c.btn_validate,
+            app.c.btn_toggle_left,
+            app.c.btn_toggle_right,
+        ] {
+            show(control, !app.home_view);
+        }
+        show(app.c.btn_build, app.home_view);
+        if !app.home_view {
+            move_to(app.c.toolbar, 0, 0, w, toolbar_h);
+            move_to(app.c.toolbar_title, 12, 8, 162, 28);
+            move_to(app.c.btn_new, 180, 8, 60, 28);
+            move_to(app.c.btn_load, 246, 8, 70, 28);
+            move_to(app.c.btn_save, 322, 8, 70, 28);
+            move_to(app.c.btn_validate, 398, 8, 82, 28);
+            move_to(app.c.btn_toggle_right, w - 126, 8, 118, 28);
+            move_to(app.c.btn_toggle_left, w - 268, 8, 136, 28);
+        }
 
-        move_to(app.c.statusbar, 0, h - status_h, w, status_h);
+        show(app.c.statusbar, !app.home_view);
+        if !app.home_view {
+            move_to(app.c.statusbar, 0, h - status_h, w, status_h);
+        }
 
-        let cy = toolbar_h;
-        let ch = (h - toolbar_h - status_h).max(0);
-        let nav_w = if app.left_collapsed { 0 } else { 232 };
-        let pv_w = if app.right_collapsed { 0 } else { 330 };
-        let center_x = if nav_w > 0 { nav_w + gap } else { 0 };
-        let center_w = (w - center_x - if pv_w > 0 { pv_w + gap } else { 0 }).max(0);
+        let nav_w = if app.left_collapsed { 0 } else { 184 };
+        let pv_w = if app.right_collapsed { 0 } else { 276 };
+        let center_x = nav_w;
+        let center_w = (w - center_x - pv_w).max(0);
         app.geom_left = Rect {
             x: 0,
-            y: cy,
+            y: content_y,
             w: nav_w,
-            h: ch,
+            h: content_h,
         };
         app.geom_center = Rect {
             x: center_x,
-            y: cy,
+            y: content_y,
             w: center_w,
-            h: ch,
+            h: content_h,
         };
         app.geom_right = Rect {
             x: if pv_w > 0 { w - pv_w } else { w },
-            y: cy,
+            y: content_y,
             w: pv_w,
-            h: ch,
+            h: content_h,
         };
 
         show(app.c.panel_nav, nav_w > 0);
         show(app.c.panel_center, center_w > 0);
         show(app.c.panel_right, pv_w > 0);
         if nav_w > 0 {
-            move_to(app.c.panel_nav, 0, cy, nav_w, ch);
+            move_to(app.c.panel_nav, 0, content_y, nav_w, content_h);
         }
         if center_w > 0 {
-            move_to(app.c.panel_center, center_x, cy, center_w, ch);
+            move_to(app.c.panel_center, center_x, content_y, center_w, content_h);
         }
         if pv_w > 0 {
-            move_to(app.c.panel_right, w - pv_w, cy, pv_w, ch);
+            move_to(app.c.panel_right, w - pv_w, content_y, pv_w, content_h);
         }
         layout_nav(app);
         layout_center(app);
         layout_right(app);
     }
 
-    /// Refresh navigation captions: group headers show their collapse
-    /// state, the current page is marked and bolded.
-    unsafe fn refresh_nav(app: &mut App) {
-        for (gi, (name, _)) in GROUPS.iter().enumerate() {
-            let arrow = if app.nav_collapsed[gi] { ">" } else { "v" };
-            set_text(app.c.nav_groups[gi], &format!("{arrow}  {name}"));
-        }
-        for page in 0..PAGE_COUNT {
-            let btn = app.c.nav_items[page];
-            if page == app.editor_page {
-                set_text(btn, PAGE_TITLES[page]);
-                set_font(btn, app.font_bold);
-            } else {
-                set_text(btn, PAGE_TITLES[page]);
-                set_font(btn, app.font_ui);
-            }
-        }
-    }
-
     unsafe fn layout_nav(app: &mut App) {
         let g = app.geom_left;
         if g.w <= 0 {
             show(app.c.nav_brand, false);
+            show(app.c.nav_new_project, false);
+            show(app.c.nav_projects, false);
+            show(app.c.nav_templates, false);
+            show(app.c.nav_settings, false);
             show(app.c.nav_hint_title, false);
             show(app.c.nav_hint, false);
             for b in app.c.nav_groups.clone() {
@@ -2223,34 +2378,29 @@ mod win {
             }
             return;
         }
-        refresh_nav(app);
-        let x = g.x + 10;
-        let w = (g.w - 20).max(40);
-        // Brand block at the top; get-started hint pinned to the bottom.
-        show(app.c.nav_brand, true);
-        move_to(app.c.nav_brand, x, g.y + 12, w, 24);
-        show(app.c.nav_hint_title, true);
-        move_to(app.c.nav_hint_title, x, g.y + g.h - 88, w, 20);
-        show(app.c.nav_hint, true);
-        move_to(app.c.nav_hint, x, g.y + g.h - 64, w, 56);
-        let mut y = g.y + 48;
-        for (gi, (_, pages)) in GROUPS.iter().enumerate() {
-            let header = app.c.nav_groups[gi];
-            show(header, true);
-            move_to(header, x, y, w, 26);
-            y += 30;
-            for page in *pages {
-                let item = app.c.nav_items[*page];
-                if app.nav_collapsed[gi] {
-                    show(item, false);
-                } else {
-                    show(item, true);
-                    move_to(item, x + 14, y, (w - 14).max(40), 24);
-                    y += 27;
-                }
-            }
-            y += 6;
+        show(app.c.nav_brand, false);
+        for b in app.c.nav_groups.clone() {
+            show(b, false);
         }
+        for b in app.c.nav_items.clone() {
+            show(b, false);
+        }
+        let x = g.x + 12;
+        let w = (g.w - 24).max(40);
+        let nav_items = [
+            (app.c.nav_new_project, 12),
+            (app.c.nav_projects, 56),
+            (app.c.nav_templates, 100),
+            (app.c.nav_settings, 144),
+        ];
+        for (button, y) in nav_items {
+            show(button, true);
+            move_to(button, x, g.y + y, w, 38);
+        }
+        show(app.c.nav_hint_title, true);
+        move_to(app.c.nav_hint_title, x, g.y + g.h - 92, w, 20);
+        show(app.c.nav_hint, true);
+        move_to(app.c.nav_hint, x, g.y + g.h - 68, w, 58);
     }
 
     /// Show one editor page in the centre and lay out its rows. Switching
@@ -2261,6 +2411,7 @@ mod win {
             sync_config_from_ui(app);
             app.editor_page = page;
         }
+        app.home_view = false;
         set_text(
             app.c.lbl_center_title,
             if step_for_page(app.editor_page) == 3 {
@@ -2287,15 +2438,17 @@ mod win {
                 },
             );
         }
-        set_text(
-            app.c.lbl_eyebrow,
-            &format!(
+        let eyebrow = if app.home_view {
+            "NEW INSTALLER PROJECT".to_string()
+        } else {
+            format!(
                 "STEP {} OF {} — {}",
                 current + 1,
                 STEP_COUNT,
                 STEP_TITLES[current].to_uppercase()
-            ),
-        );
+            )
+        };
+        set_text(app.c.lbl_eyebrow, &eyebrow);
     }
 
     unsafe fn layout_center(app: &mut App) {
@@ -2314,7 +2467,11 @@ mod win {
             show(app.c.lbl_eyebrow, false);
             show(app.c.lbl_center_title, false);
             show(app.c.lbl_center_hint, false);
+            show(app.c.lbl_build_title, false);
+            show(app.c.lbl_build_hint, false);
+            show(app.c.btn_build, false);
             show(app.c.lbl_expert, false);
+            show(app.c.lbl_expert_hint, false);
             show(app.c.expert_panel, false);
             for b in app.c.step_btns.clone() {
                 show(b, false);
@@ -2330,25 +2487,39 @@ mod win {
             return;
         }
         refresh_steps(app);
+        set_text(
+            app.c.lbl_center_title,
+            if app.home_view {
+                "Create your installer"
+            } else if step_for_page(app.editor_page) == 3 {
+                "Build your installer"
+            } else {
+                "Create your installer"
+            },
+        );
+        set_text(
+            app.c.lbl_center_hint,
+            if app.home_view {
+                "Follow the steps below to define your application, configure the installation experience, and build a distributable installer package."
+            } else {
+                PAGE_HINTS[app.editor_page]
+            },
+        );
         show(app.c.lbl_eyebrow, true);
         show(app.c.lbl_center_title, true);
         show(app.c.lbl_center_hint, true);
-        move_to(app.c.lbl_eyebrow, g.x + 16, g.y + 8, g.w - 32, 18);
-        move_to(app.c.lbl_center_title, g.x + 16, g.y + 28, g.w - 32, 36);
-        move_to(app.c.lbl_center_hint, g.x + 16, g.y + 66, g.w - 32, 20);
+        let x = g.x + 18;
+        let w = (g.w - 36).max(60);
+        move_to(app.c.lbl_eyebrow, x, g.y + 18, w, 18);
+        move_to(app.c.lbl_center_title, x, g.y + 40, w, 38);
+        move_to(app.c.lbl_center_hint, x, g.y + 82, w, 38);
 
         // Step strip: four equal cards across the editor width.
-        let strip_w = (g.w - 32 - (STEP_COUNT as i32 - 1) * 8).max(40);
+        let strip_w = (g.w - 36 - (STEP_COUNT as i32 - 1) * 8).max(40);
         let step_w = strip_w / STEP_COUNT as i32;
         for (step, btn) in app.c.step_btns.clone().iter().enumerate() {
             show(*btn, true);
-            move_to(
-                *btn,
-                g.x + 16 + step as i32 * (step_w + 8),
-                g.y + 92,
-                step_w,
-                82,
-            );
+            move_to(*btn, x + step as i32 * (step_w + 8), g.y + 138, step_w, 128);
         }
 
         let current = app.c.pages[app.editor_page].clone();
@@ -2362,66 +2533,92 @@ mod win {
             }
         }
 
-        let x = g.x + 16;
-        let w = (g.w - 32).max(60);
-        // The expert-controls strip owns the bottom 42px of the editor.
-        let expert_y = g.y + g.h - 42;
-        let bottom = expert_y - 14;
-        let mut y = g.y + 184;
-        for row in &current {
-            let height = if row.fill {
-                (bottom - y).max(40)
-            } else {
-                row.height
-            };
-            for h in [row.label, row.main, row.extra] {
+        let strip_x = app.geom_left.w + 16;
+        let strip_w = (g.w + app.geom_right.w - 32).max(g.w - 32);
+        let expert_y = g.y + g.h - 90;
+        if app.home_view {
+            for h in &current_set {
                 if !h.is_null() {
-                    show(h, true);
+                    show(*h, false);
                 }
             }
-            match row.kind {
-                ROW_FORM => {
-                    move_to(row.label, x, y + 3, 150, 20);
-                    if row.extra.is_null() {
-                        move_to(row.main, x + 158, y, (w - 158).max(40), row.extent);
-                    } else {
-                        move_to(row.main, x + 158, y, (w - 158 - 44).max(40), row.extent);
-                        move_to(row.extra, x + w - 36, y, 36, 24);
+            show(app.c.lbl_build_title, true);
+            show(app.c.lbl_build_hint, true);
+            set_text(app.c.btn_build, "Next   →");
+            show(app.c.btn_build, true);
+            let cta_y = expert_y - 100;
+            move_to(app.c.lbl_build_title, x, cta_y, w - 150, 28);
+            move_to(app.c.lbl_build_hint, x, cta_y + 34, w - 150, 36);
+            move_to(app.c.btn_build, x + w - 134, cta_y + 8, 124, 36);
+        } else {
+            show(app.c.lbl_build_title, false);
+            show(app.c.lbl_build_hint, false);
+            show(app.c.btn_build, false);
+            let bottom = expert_y - 14;
+            let mut y = g.y + 184;
+            for row in &current {
+                let height = if row.fill {
+                    (bottom - y).max(40)
+                } else {
+                    row.height
+                };
+                for h in [row.label, row.main, row.extra] {
+                    if !h.is_null() {
+                        show(h, true);
                     }
                 }
-                ROW_FULL => move_to(row.main, x, y, w, height),
-                ROW_SPLIT => {
-                    let half = ((w - 8) / 2).max(40);
-                    move_to(row.main, x, y, half, row.extent);
-                    if !row.extra.is_null() {
-                        move_to(
-                            row.extra,
-                            x + half + 8,
-                            y,
-                            (w - half - 8).max(40),
-                            row.extent,
-                        );
+                match row.kind {
+                    ROW_FORM => {
+                        move_to(row.label, x, y + 3, 150, 20);
+                        if row.extra.is_null() {
+                            move_to(row.main, x + 158, y, (w - 158).max(40), row.extent);
+                        } else {
+                            move_to(row.main, x + 158, y, (w - 158 - 44).max(40), row.extent);
+                            move_to(row.extra, x + w - 36, y, 36, 24);
+                        }
                     }
+                    ROW_FULL => move_to(row.main, x, y, w, height),
+                    ROW_SPLIT => {
+                        let half = ((w - 8) / 2).max(40);
+                        move_to(row.main, x, y, half, row.extent);
+                        if !row.extra.is_null() {
+                            move_to(
+                                row.extra,
+                                x + half + 8,
+                                y,
+                                (w - half - 8).max(40),
+                                row.extent,
+                            );
+                        }
+                    }
+                    _ => move_to(row.label, x, y + 2, w, 20),
                 }
-                _ => move_to(row.label, x, y + 2, w, 20),
-            }
-            y += height + 8;
-            if y > bottom {
-                break;
+                y += height + 8;
+                if y > bottom {
+                    break;
+                }
             }
         }
 
-        // Expert-controls strip along the bottom of the editor.
+        // Expert controls span the editor and preview, as in the reference.
         show(app.c.expert_panel, true);
-        move_to(app.c.expert_panel, x - 6, expert_y - 4, w + 12, 38);
+        move_to(app.c.expert_panel, strip_x, expert_y, strip_w, 62);
         show(app.c.lbl_expert, true);
-        move_to(app.c.lbl_expert, x + 6, expert_y + 5, 100, 20);
-        let expert_x = x + 110;
-        let expert_total = (w - 110).max(60);
-        let btn_w = (expert_total - 5 * 6) / 6;
+        move_to(app.c.lbl_expert, strip_x + 14, expert_y + 7, 188, 20);
+        show(app.c.lbl_expert_hint, true);
+        move_to(app.c.lbl_expert_hint, strip_x + 14, expert_y + 30, 330, 18);
+        let expert_x = strip_x + 350;
+        let expert_total = (strip_w - 360).max(60);
+        let btn_w = (expert_total - 5 * 4) / 6;
         for (i, btn) in app.c.expert_btns.clone().iter().enumerate() {
             show(*btn, true);
-            move_to(*btn, expert_x + i as i32 * (btn_w + 6), expert_y, btn_w, 30);
+            move_to(
+                *btn,
+                expert_x + i as i32 * (btn_w + 4),
+                expert_y + 16,
+                btn_w,
+                30,
+            );
         }
     }
 
@@ -2435,6 +2632,7 @@ mod win {
             app.c.pv_panel,
             app.c.pv_title,
             app.c.pv_body,
+            app.c.pv_btn_cancel,
             app.c.pv_desktop,
             app.c.pv_launch,
             app.c.pv_launch_tray,
@@ -2451,17 +2649,25 @@ mod win {
         }
         show(app.c.lbl_preview_header, true);
         show(app.c.lbl_preview_caption, true);
-        show(app.c.lbl_page, true);
-        show(app.c.cb_page, true);
         show(app.c.pv_panel, true);
-        move_to(app.c.lbl_preview_header, g.x + 12, g.y + 10, g.w - 24, 20);
-        move_to(app.c.lbl_page, g.x + 12, g.y + 37, 92, 20);
-        move_to(app.c.cb_page, g.x + 108, g.y + 34, 176, 110);
-        let preview_h = (g.h - 184).clamp(180, 260);
+        move_to(app.c.lbl_preview_header, g.x + 16, g.y + 18, g.w - 32, 20);
+        let preview_y = if app.home_view {
+            show(app.c.lbl_page, false);
+            show(app.c.cb_page, false);
+            g.y + 64
+        } else {
+            show(app.c.lbl_page, true);
+            show(app.c.cb_page, true);
+            move_to(app.c.lbl_page, g.x + 12, g.y + 42, 92, 20);
+            move_to(app.c.cb_page, g.x + 108, g.y + 39, g.w - 124, 110);
+            g.y + 72
+        };
+        let preview_w = (g.w - 56).clamp(190, 260);
+        let preview_h = ((preview_w * 72) / 100).clamp(146, 180);
         app.geom_pv = Rect {
-            x: g.x + 10,
-            y: g.y + 66,
-            w: (g.w - 20).max(0),
+            x: g.x + 16,
+            y: preview_y,
+            w: preview_w,
             h: preview_h,
         };
         let pv = app.geom_pv;
@@ -2469,9 +2675,9 @@ mod win {
         move_to(
             app.c.lbl_preview_caption,
             pv.x + 2,
-            pv.y + pv.h + 12,
-            pv.w - 4,
-            52,
+            pv.y + pv.h + 10,
+            pv.w,
+            56,
         );
         position_preview_children(app);
     }
@@ -2494,36 +2700,43 @@ mod win {
         show(app.c.pv_title, panel_visible);
         show(app.c.pv_body, panel_visible);
         show(app.c.pv_btn_page, panel_visible);
+        show(app.c.pv_btn_cancel, panel_visible && !on_finish);
         if !panel_visible {
+            show(app.c.pv_btn_cancel, false);
             for (h, _, _) in boxes {
                 show(h, false);
             }
             return;
         }
-        let content_x = pv.x + 64;
-        let content_w = (pv.w - 76).max(40);
-        move_to(app.c.pv_title, content_x, pv.y + 12, content_w, 26);
+        let topbar_h = 18;
+        let rail_w = ((pv.w / 5).clamp(42, 56)).min(pv.w - 100);
+        let content_x = pv.x + rail_w + 10;
+        let content_w = (pv.w - rail_w - 20).max(40);
+        let footer_y = pv.y + pv.h - 31;
         move_to(
-            app.c.pv_btn_page,
-            pv.x + pv.w - 134,
-            pv.y + pv.h - 42,
-            120,
-            30,
+            app.c.pv_title,
+            content_x,
+            pv.y + topbar_h + 8,
+            content_w,
+            20,
         );
-
         let visible_count = boxes.iter().filter(|(_, vis, _)| on_finish && *vis).count() as i32;
-        let stack_h = visible_count * 26;
-        let body_h = (pv.h - 46 - 42 - stack_h - 18).max(50);
-        move_to(app.c.pv_body, content_x, pv.y + 46, content_w, body_h);
+        let stack_h = visible_count * 18;
+        let body_y = pv.y + topbar_h + 34;
+        let body_h = (footer_y - body_y - stack_h - 8).max(38);
+        move_to(app.c.pv_body, content_x, body_y, content_w, body_h);
+        let cancel_x = pv.x + pv.w - 112;
+        move_to(app.c.pv_btn_cancel, cancel_x, footer_y, 48, 22);
+        move_to(app.c.pv_btn_page, cancel_x + 53, footer_y, 50, 22);
 
-        let mut y = pv.y + 46 + body_h + 10;
+        let mut y = body_y + body_h + 6;
         for (h, vis, indent) in boxes {
             let vis_now = on_finish && vis;
             show(h, vis_now);
             if vis_now {
                 let x = pv.x + 18 + if indent { 26 } else { 0 };
-                move_to(h, x, y, pv.w - 50, 24);
-                y += 26;
+                move_to(h, x, y, pv.w - 36, 18);
+                y += 19;
             }
         }
     }
@@ -3121,15 +3334,10 @@ mod win {
         let name = &cfg.app.name;
         match app.page {
             PAGE_WELCOME => (
-                format!("Welcome to the {name} Setup Wizard"),
+                "Welcome".to_string(),
                 format!(
-                    "Welcome to the {name} setup wizard.\n\n\
-                     This will install {name} {} by {} on your computer.\n\n\
-                     It is recommended that you close all other applications before starting Setup. \
-                     This makes it possible to update relevant system files without having to reboot your computer.\n\n\
-                     Text in this wizard types itself out, terminal-style. Click, or press Space / Enter, to reveal it instantly.\n\n\
-                     Click Next to continue.",
-                    cfg.app.version, cfg.app.publisher
+                    "This will install {name} on your computer.\n\n\
+                     Please close other applications before continuing."
                 ),
             ),
             PAGE_DIRECTORY => (
@@ -3186,7 +3394,7 @@ mod win {
         set_text(
             app.c.pv_btn_page,
             match app.page {
-                PAGE_WELCOME => "Next >",
+                PAGE_WELCOME => "Next",
                 PAGE_DIRECTORY => "Install",
                 _ => "Finish",
             },
@@ -3276,11 +3484,21 @@ mod win {
             return;
         }
         match id {
-            ID_BTN_NEW => do_new(app),
+            ID_BTN_NEW => {
+                do_new(app);
+                layout(app, hwnd);
+            }
             ID_BTN_LOAD => do_load(app, hwnd),
             ID_BTN_SAVE => do_save(app, hwnd),
             ID_BTN_VALIDATE | ID_BTN_VALIDATE2 => do_validate(app),
+            ID_BTN_BUILD if app.home_view => show_page(app, hwnd, EP_BUILD),
             ID_BTN_BUILD | ID_BTN_BUILD2 => do_build(app),
+            ID_NAV_NEW_PROJECT => {
+                do_new(app);
+                layout(app, hwnd);
+            }
+            ID_NAV_PROJECTS | ID_NAV_TEMPLATES => do_load(app, hwnd),
+            ID_NAV_SETTINGS => show_page(app, hwnd, EP_THEME),
             ID_BTN_TOGGLE_LEFT => toggle_nav(app, hwnd),
             ID_BTN_TOGGLE_RIGHT => toggle_preview(app, hwnd),
             ID_BTN_BROWSE_STUB => {
@@ -3430,6 +3648,9 @@ mod win {
         app.stub_path = String::new();
         app.build_portable = false;
         app.project_path = None;
+        app.editor_page = EP_BUILD;
+        app.home_view = true;
+        app.page = PAGE_WELCOME;
         app.last_model = None;
         app.preview = FinishSelection::from_defaults(&app.cfg.finish);
         app.list_sel = [-1; LIST_KINDS];
@@ -3462,7 +3683,11 @@ mod win {
                     let problems = cfg.validate();
                     app.cfg = cfg;
                     app.project_path = Some(path.clone());
+                    app.editor_page = EP_APPLICATION;
+                    app.home_view = false;
+                    app.page = PAGE_WELCOME;
                     app.last_model = None;
+                    layout(app, hwnd);
                     apply_config_to_ui(app);
                     refresh_preview(app);
                     let mut status = format!("Loaded project from {}", path.display());
